@@ -1,0 +1,34 @@
+name: Validate Fantasy Dawair
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m py_compile server.py
+      - run: pip install -r requirements.txt
+      - name: Smoke test SQLite fallback
+        env:
+          ADMIN_PASSWORD: TestOnlyPassword123!
+          PORT: "3099"
+        run: |
+          python server.py > /tmp/fantasy.log 2>&1 &
+          PID=$!
+          for i in {1..20}; do
+            if curl -fsS http://127.0.0.1:3099/health; then
+              kill $PID
+              exit 0
+            fi
+            sleep 0.5
+          done
+          cat /tmp/fantasy.log
+          kill $PID || true
+          exit 1
