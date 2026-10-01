@@ -1,0 +1,22 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Local database / runtime data
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
