@@ -1,0 +1,276 @@
+# -*- coding: utf-8 -*-
+import os, json, time, secrets, hashlib, sqlite3, threading, mimetypes, urllib.parse, http.cookies
+from pathlib import Path
+from datetime import datetime, timezone
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+
+ROOT=Path(__file__).resolve().parent
+PUBLIC=ROOT/"public"; DATA=ROOT/"data"; DATA.mkdir(exist_ok=True)
+PORT=int(os.getenv("PORT","3000")); HOST=os.getenv("HOST","0.0.0.0")
+DATABASE_URL=os.getenv("DATABASE_URL","").strip()
+PG=DATABASE_URL.startswith(("postgres://","postgresql://"))
+LOCK=threading.RLock(); SESS={}; SESSION_TTL=7*24*3600
+
+if PG:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    conn=psycopg2.connect(DATABASE_URL)
+    conn.autocommit=True
+else:
+    conn=sqlite3.connect(DATA/"fantasy.db",check_same_thread=False)
+    conn.row_factory=sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+
+def sql(q): return q.replace("?","%s") if PG else q
+def execq(q,a=()):
+    c=conn.cursor(cursor_factory=RealDictCursor) if PG else conn.cursor()
+    c.execute(sql(q),a); return c
+def rows(q,a=()): return [dict(x) for x in execq(q,a).fetchall()]
+def row(q,a=()):
+    x=execq(q,a).fetchone(); return dict(x) if x else None
+def val(q,a=(),default=0):
+    x=execq(q,a).fetchone()
+    if not x:return default
+    if isinstance(x,dict):return next(iter(x.values()))
+    return x[0]
+def insert_id(q,a=()):
+    if PG:
+        c=execq(q+" RETURNING id",a); return c.fetchone()["id"]
+    c=execq(q,a); conn.commit(); return c.lastrowid
+def now(): return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
+def i(v,d=0):
+    try:return int(v)
+    except:return d
+def h(secret,salt):
+    return hashlib.scrypt(str(secret).encode(),salt=str(salt).encode(),n=16384,r=8,p=1,dklen=32).hex()
+
+def init():
+    ID="BIGSERIAL PRIMARY KEY" if PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    schema=f"""
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS admins(id {ID},username TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,salt TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS participants(id {ID},name TEXT NOT NULL,code_hash TEXT UNIQUE NOT NULL,code_hint TEXT,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS players(id {ID},name TEXT NOT NULL,group_no INTEGER NOT NULL CHECK(group_no BETWEEN 1 AND 4),active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS rounds(id {ID},number INTEGER UNIQUE NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'draft',lock_at TEXT,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS lineups(id {ID},participant_id BIGINT NOT NULL,round_id BIGINT NOT NULL,captain_player_id BIGINT NOT NULL,vice_player_id BIGINT NOT NULL,chip TEXT,submitted_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(participant_id,round_id));
+CREATE TABLE IF NOT EXISTS lineup_players(id {ID},lineup_id BIGINT NOT NULL,player_id BIGINT NOT NULL,role TEXT NOT NULL,bench_order INTEGER NOT NULL DEFAULT 0,UNIQUE(lineup_id,player_id));
+CREATE TABLE IF NOT EXISTS events(id {ID},round_id BIGINT NOT NULL,player_id BIGINT NOT NULL,goals INTEGER NOT NULL DEFAULT 0,wins INTEGER NOT NULL DEFAULT 0,hattricks INTEGER NOT NULL DEFAULT 0,attendance INTEGER NOT NULL DEFAULT 0,best_player INTEGER NOT NULL DEFAULT 0,yellow INTEGER NOT NULL DEFAULT 0,red INTEGER NOT NULL DEFAULT 0,no_shoes INTEGER NOT NULL DEFAULT 0,own_goals INTEGER NOT NULL DEFAULT 0,raw_points INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,UNIQUE(round_id,player_id));
+CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL);
+"""
+    with LOCK:
+        if PG:
+            c=conn.cursor()
+            for s in schema.split(";"):
+                if s.strip(): c.execute(s)
+        else: conn.executescript(schema)
+        defaults={
+          "site_name":"فانتسي دوائر","captain_multiplier":"2","free_transfers":"2",
+          "points_goal":"3","points_win":"5","points_hattrick":"3","points_attendance":"3",
+          "points_best_player":"8","points_yellow":"-2","points_red":"-5","points_no_shoes":"-3","points_own_goal":"-2",
+          "rules_note":"اختر 8 لاعبين: 2 من كل مجموعة، 6 أساسيين و2 احتياط. الكبتن والنائب من الأساسيين فقط. كل طاقة تستخدم مرة واحدة."
+        }
+        for k,v in defaults.items(): execq("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING",(k,v))
+        execq("INSERT INTO schema_migrations(version,applied_at) VALUES(1,?) ON CONFLICT(version) DO NOTHING",(now(),))
+        if val("SELECT COUNT(*) FROM admins")==0:
+            user=os.getenv("ADMIN_USERNAME","admin")
+            pw=os.getenv("ADMIN_PASSWORD","").strip() or secrets.token_urlsafe(16)
+            salt=secrets.token_hex(16)
+            insert_id("INSERT INTO admins(username,password_hash,salt,created_at) VALUES(?,?,?,?)",(user,h(pw,salt),salt,now()))
+            if not os.getenv("ADMIN_PASSWORD"): print("INITIAL ADMIN PASSWORD:",pw)
+        if val("SELECT COUNT(*) FROM rounds")==0:
+            insert_id("INSERT INTO rounds(number,name,status,created_at) VALUES(1,'الجولة 1','open',?)",(now(),))
+        if not PG: conn.commit()
+init()
+
+def settings():
+    out={}
+    for r in rows("SELECT key,value FROM settings"):
+        v=r["value"]
+        try:out[r["key"]]=int(v)
+        except:out[r["key"]]=v
+    return out
+
+def raw(e,s=None):
+    s=s or settings()
+    return i(e.get("goals"))*s["points_goal"]+i(e.get("wins"))*s["points_win"]+i(e.get("hattricks"))*s["points_hattrick"]+(s["points_attendance"] if i(e.get("attendance")) else 0)+i(e.get("best_player"))*s["points_best_player"]+i(e.get("yellow"))*s["points_yellow"]+i(e.get("red"))*s["points_red"]+i(e.get("no_shoes"))*s["points_no_shoes"]+i(e.get("own_goals"))*s["points_own_goal"]
+
+def lineup(pid,rid):
+    l=row("SELECT * FROM lineups WHERE participant_id=? AND round_id=?",(pid,rid))
+    if l:l["players"]=rows("SELECT lp.*,p.name,p.group_no FROM lineup_players lp JOIN players p ON p.id=lp.player_id WHERE lp.lineup_id=? ORDER BY CASE lp.role WHEN 'starter' THEN 0 ELSE 1 END,lp.bench_order",(l["id"],))
+    return l
+
+def used_chips(pid,exclude=0):
+    q="SELECT chip FROM lineups WHERE participant_id=? AND chip IS NOT NULL"; a=[pid]
+    if exclude:q+=" AND round_id<>?";a.append(exclude)
+    return [x["chip"] for x in rows(q,tuple(a))]
+
+def score(pid,rid):
+    l=lineup(pid,rid)
+    if not l:return 0
+    ev={x["player_id"]:x for x in rows("SELECT player_id,raw_points,attendance FROM events WHERE round_id=?",(rid,))}
+    total=0
+    for p in l["players"]:
+        if p["role"]=="starter" or l.get("chip")=="bench_boost": total+=ev.get(p["player_id"],{}).get("raw_points",0)
+    s=settings(); cap=ev.get(l["captain_player_id"],{})
+    cid=l["captain_player_id"] if cap.get("attendance") else l["vice_player_id"]
+    ce=ev.get(cid,{})
+    if ce.get("attendance"):
+        mult=3 if (cid==l["captain_player_id"] and l.get("chip")=="triple_captain") else s["captain_multiplier"]
+        total+=ce.get("raw_points",0)*(mult-1)
+    return total
+
+def leaderboard(rid=0):
+    rs=rows("SELECT id FROM rounds WHERE status IN ('open','locked','scored') ORDER BY number")
+    out=[]
+    for p in rows("SELECT id,name FROM participants WHERE active=1 ORDER BY name"):
+        total=sum(score(p["id"],r["id"]) for r in rs)
+        rp=score(p["id"],rid) if rid else None
+        out.append({"id":p["id"],"name":p["name"],"total_points":total,"round_points":rp})
+    out.sort(key=lambda x:(-(x["round_points"] if rid else x["total_points"]),-x["total_points"],x["name"]))
+    for n,x in enumerate(out,1):x["rank"]=n
+    return out
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self,f,*a): print("[WEB]",f%a)
+    def body(self):
+        n=min(i(self.headers.get("Content-Length")),2_000_000)
+        return json.loads(self.rfile.read(n).decode()) if n else {}
+    def cookies(self):
+        c=http.cookies.SimpleCookie();c.load(self.headers.get("Cookie",""));return {k:v.value for k,v in c.items()}
+    def sess(self):
+        t=self.cookies().get("sid"); x=SESS.get(t)
+        if not x:return None
+        if time.time()-x["t"]>SESSION_TTL:SESS.pop(t,None);return None
+        x["t"]=time.time();return x
+    def new_session(self,x):
+        t=secrets.token_hex(24); SESS[t]={**x,"t":time.time()}; return t
+    def sendj(self,status,obj,cookie=None):
+        b=json.dumps(obj,ensure_ascii=False).encode()
+        self.send_response(status);self.send_header("Content-Type","application/json; charset=utf-8");self.send_header("Cache-Control","no-store")
+        self.send_header("X-Content-Type-Options","nosniff");self.send_header("X-Frame-Options","DENY")
+        if cookie:self.send_header("Set-Cookie",cookie)
+        self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b)
+    def static(self,p):
+        rel="index.html" if p=="/" else p.lstrip("/"); f=(PUBLIC/rel).resolve()
+        if PUBLIC.resolve() not in f.parents and f!=PUBLIC.resolve():return self.sendj(403,{"error":"forbidden"})
+        if not f.exists() or f.is_dir():f=PUBLIC/"index.html"
+        b=f.read_bytes();ct=mimetypes.guess_type(str(f))[0] or "application/octet-stream"
+        self.send_response(200);self.send_header("Content-Type",ct);self.send_header("Content-Length",str(len(b)));self.end_headers();self.wfile.write(b)
+    def do_GET(self):self.route("GET")
+    def do_POST(self):self.route("POST")
+    def do_PUT(self):self.route("PUT")
+    def route(self,m):
+        u=urllib.parse.urlsplit(self.path);p=u.path;q=urllib.parse.parse_qs(u.query)
+        try:
+            if p=="/health":return self.sendj(200,{"ok":True,"database":"postgres" if PG else "sqlite"})
+            if not p.startswith("/api/"):return self.static(p)
+            with LOCK:return self.api(m,p,q)
+        except Exception as e:
+            import traceback;traceback.print_exc();return self.sendj(500,{"error":"حدث خطأ داخلي","detail":str(e)})
+    def auth(self,role=None):
+        s=self.sess()
+        if not s:self.sendj(401,{"error":"يلزم تسجيل الدخول"});return None
+        if role and s["role"]!=role:self.sendj(403,{"error":"غير مصرح"});return None
+        return s
+    def api(self,m,p,q):
+        if m=="POST" and p=="/api/login/admin":
+            b=self.body();a=row("SELECT * FROM admins WHERE username=?",(b.get("username",""),))
+            if not a or h(b.get("password",""),a["salt"])!=a["password_hash"]:return self.sendj(401,{"error":"بيانات الدخول غير صحيحة"})
+            t=self.new_session({"role":"admin","id":a["id"],"name":a["username"]});return self.sendj(200,{"ok":True},f"sid={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
+        if m=="POST" and p=="/api/login/participant":
+            b=self.body();code=h(str(b.get("code","")).strip().upper(),"dawair-participant-v1");u=row("SELECT id,name FROM participants WHERE code_hash=? AND active=1",(code,))
+            if not u:return self.sendj(401,{"error":"رمز الدخول غير صحيح"})
+            t=self.new_session({"role":"participant","id":u["id"],"name":u["name"]});return self.sendj(200,{"ok":True},f"sid={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
+        if m=="POST" and p=="/api/logout":SESS.pop(self.cookies().get("sid"),None);return self.sendj(200,{"ok":True},"sid=; Path=/; Max-Age=0")
+        if m=="GET" and p=="/api/me":
+            s=self.sess();return self.sendj(200,{"authenticated":False} if not s else {"authenticated":True,"role":s["role"],"id":s["id"],"name":s["name"]})
+        a=self.auth()
+        if not a:return
+        if m=="GET" and p=="/api/bootstrap":
+            rr=rows("SELECT * FROM rounds ORDER BY number DESC");cur=next((x for x in rr if x["status"]=="open"),rr[0] if rr else None)
+            out={"settings":settings(),"players":rows("SELECT id,name,group_no FROM players WHERE active=1 ORDER BY group_no,name"),"rounds":rr,"current_round":cur}
+            if a["role"]=="participant":
+                out["lineup"]=lineup(a["id"],cur["id"]) if cur else None;out["used_chips"]=used_chips(a["id"]);out["leaderboard"]=leaderboard(cur["id"] if cur else 0)
+            return self.sendj(200,out)
+        if m=="GET" and p=="/api/leaderboard":return self.sendj(200,leaderboard(i(q.get("round_id",["0"])[0])))
+        parts=p.strip("/").split("/")
+        if len(parts)==3 and parts[:2]==["api","lineup"] and a["role"]=="participant":
+            rid=i(parts[2]); r=row("SELECT * FROM rounds WHERE id=?",(rid,))
+            if m=="GET":return self.sendj(200,{"lineup":lineup(a["id"],rid),"score":score(a["id"],rid)})
+            if m=="PUT":
+                if not r or r["status"]!="open":return self.sendj(400,{"error":"الجولة مقفلة"})
+                b=self.body();items=b.get("players",[]);ids=[i(x.get("player_id")) for x in items]
+                if len(ids)!=8 or len(set(ids))!=8:return self.sendj(400,{"error":"يجب اختيار 8 لاعبين مختلفين"})
+                ph=",".join(["?"]*8);ps=rows(f"SELECT id,group_no FROM players WHERE active=1 AND id IN ({ph})",tuple(ids))
+                counts={g:0 for g in range(1,5)}
+                for x in ps:counts[x["group_no"]]+=1
+                if len(ps)!=8 or any(counts[g]!=2 for g in counts):return self.sendj(400,{"error":"يجب اختيار لاعبين من كل مجموعة"})
+                st=[x for x in items if x.get("role")=="starter"];be=[x for x in items if x.get("role")=="bench"]
+                if len(st)!=6 or len(be)!=2:return self.sendj(400,{"error":"المطلوب 6 أساسيين و2 احتياط"})
+                cap=i(b.get("captain_player_id"));vice=i(b.get("vice_player_id"));sid={i(x["player_id"]) for x in st}
+                if cap==vice or cap not in sid or vice not in sid:return self.sendj(400,{"error":"الكبتن والنائب يجب أن يكونا أساسيين مختلفين"})
+                chip=b.get("chip") or None
+                if chip and chip in used_chips(a["id"],rid):return self.sendj(400,{"error":"استخدمت هذه الطاقة سابقاً"})
+                ex=row("SELECT id FROM lineups WHERE participant_id=? AND round_id=?",(a["id"],rid))
+                if ex:
+                    lid=ex["id"];execq("UPDATE lineups SET captain_player_id=?,vice_player_id=?,chip=?,updated_at=? WHERE id=?",(cap,vice,chip,now(),lid));execq("DELETE FROM lineup_players WHERE lineup_id=?",(lid,))
+                else:lid=insert_id("INSERT INTO lineups(participant_id,round_id,captain_player_id,vice_player_id,chip,submitted_at,updated_at) VALUES(?,?,?,?,?,?,?)",(a["id"],rid,cap,vice,chip,now(),now()))
+                for x in items:execq("INSERT INTO lineup_players(lineup_id,player_id,role,bench_order) VALUES(?,?,?,?)",(lid,i(x["player_id"]),x["role"],i(x.get("bench_order"))))
+                if not PG:conn.commit()
+                return self.sendj(200,{"ok":True})
+        if a["role"]!="admin":return self.sendj(403,{"error":"خاص بالمشرف"})
+        if m=="GET" and p=="/api/admin/dashboard":return self.sendj(200,{"players":val("SELECT COUNT(*) FROM players WHERE active=1"),"participants":val("SELECT COUNT(*) FROM participants WHERE active=1"),"rounds":val("SELECT COUNT(*) FROM rounds"),"lineups":val("SELECT COUNT(*) FROM lineups"),"leaderboard":leaderboard()[:10]})
+        if m=="GET" and p=="/api/admin/participants":return self.sendj(200,rows("SELECT id,name,code_hint,active FROM participants ORDER BY name"))
+        if m=="POST" and p=="/api/admin/participants":
+            b=self.body();code=str(b.get("code","")).strip()
+            try:
+                uid=insert_id("INSERT INTO participants(name,code_hash,code_hint,active,created_at) VALUES(?,?,?,1,?)",(str(b.get("name","")).strip(),h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),now()));return self.sendj(200,{"ok":True,"id":uid})
+            except:return self.sendj(400,{"error":"الاسم/الرمز غير صالح أو مستخدم"})
+        if len(parts)==4 and parts[:3]==["api","admin","participants"] and m=="PUT":
+            b=self.body();uid=i(parts[3]);name=str(b.get("name","")).strip();active=1 if b.get("active") else 0
+            if b.get("code"):
+                c=str(b["code"]).strip();execq("UPDATE participants SET name=?,active=?,code_hash=?,code_hint=? WHERE id=?",(name,active,h(c.upper(),"dawair-participant-v1"),c[-3:].upper(),uid))
+            else:execq("UPDATE participants SET name=?,active=? WHERE id=?",(name,active,uid))
+            if not PG:conn.commit()
+            return self.sendj(200,{"ok":True})
+        if m=="GET" and p=="/api/admin/players":return self.sendj(200,rows("SELECT id,name,group_no,active FROM players ORDER BY group_no,name"))
+        if m=="POST" and p=="/api/admin/players":
+            b=self.body();g=i(b.get("group_no"));name=str(b.get("name","")).strip()
+            if not name or g not in (1,2,3,4):return self.sendj(400,{"error":"بيانات اللاعب غير صحيحة"})
+            return self.sendj(200,{"ok":True,"id":insert_id("INSERT INTO players(name,group_no,active,created_at) VALUES(?,?,1,?)",(name,g,now()))})
+        if len(parts)==4 and parts[:3]==["api","admin","players"] and m=="PUT":
+            b=self.body();execq("UPDATE players SET name=?,group_no=?,active=? WHERE id=?",(b.get("name",""),i(b.get("group_no")),1 if b.get("active") else 0,i(parts[3])));conn.commit() if not PG else None;return self.sendj(200,{"ok":True})
+        if m=="GET" and p=="/api/rounds":return self.sendj(200,rows("SELECT * FROM rounds ORDER BY number DESC"))
+        if m=="POST" and p=="/api/admin/rounds":
+            b=self.body();num=i(b.get("number"));return self.sendj(200,{"ok":True,"id":insert_id("INSERT INTO rounds(number,name,status,created_at) VALUES(?,?,?,?)",(num,b.get("name") or f"الجولة {num}",b.get("status") or "draft",now()))})
+        if len(parts)==4 and parts[:3]==["api","admin","rounds"] and m=="PUT":
+            b=self.body();rid=i(parts[3])
+            if b.get("status")=="open":execq("UPDATE rounds SET status='locked' WHERE status='open' AND id<>?",(rid,))
+            execq("UPDATE rounds SET name=?,status=?,lock_at=? WHERE id=?",(b.get("name",""),b.get("status","draft"),b.get("lock_at"),rid));conn.commit() if not PG else None;return self.sendj(200,{"ok":True})
+        if len(parts)==4 and parts[:3]==["api","admin","scores"]:
+            rid=i(parts[3])
+            if m=="GET":return self.sendj(200,rows("SELECT p.id player_id,p.name,p.group_no,COALESCE(e.goals,0) goals,COALESCE(e.wins,0) wins,COALESCE(e.hattricks,0) hattricks,COALESCE(e.attendance,0) attendance,COALESCE(e.best_player,0) best_player,COALESCE(e.yellow,0) yellow,COALESCE(e.red,0) red,COALESCE(e.no_shoes,0) no_shoes,COALESCE(e.own_goals,0) own_goals,COALESCE(e.raw_points,0) raw_points FROM players p LEFT JOIN events e ON e.player_id=p.id AND e.round_id=? WHERE p.active=1 ORDER BY p.group_no,p.name",(rid,)))
+            if m=="PUT":
+                s=settings()
+                for x in self.body().get("scores",[]):
+                    e={k:i(x.get(k)) for k in ["goals","wins","hattricks","attendance","best_player","yellow","red","no_shoes","own_goals"]};pts=raw(e,s)
+                    execq("INSERT INTO events(round_id,player_id,goals,wins,hattricks,attendance,best_player,yellow,red,no_shoes,own_goals,raw_points,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(round_id,player_id) DO UPDATE SET goals=excluded.goals,wins=excluded.wins,hattricks=excluded.hattricks,attendance=excluded.attendance,best_player=excluded.best_player,yellow=excluded.yellow,red=excluded.red,no_shoes=excluded.no_shoes,own_goals=excluded.own_goals,raw_points=excluded.raw_points,updated_at=excluded.updated_at",(rid,i(x["player_id"]),e["goals"],e["wins"],e["hattricks"],e["attendance"],e["best_player"],e["yellow"],e["red"],e["no_shoes"],e["own_goals"],pts,now()))
+                conn.commit() if not PG else None;return self.sendj(200,{"ok":True})
+        if m=="GET" and p=="/api/admin/settings":return self.sendj(200,settings())
+        if m=="PUT" and p=="/api/admin/settings":
+            for k,v in self.body().items():execq("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(k,str(v)))
+            conn.commit() if not PG else None;return self.sendj(200,{"ok":True})
+        if m=="PUT" and p=="/api/admin/password":
+            b=self.body();ad=row("SELECT * FROM admins WHERE id=?",(a["id"],))
+            if h(b.get("current",""),ad["salt"])!=ad["password_hash"]:return self.sendj(400,{"error":"كلمة المرور الحالية غير صحيحة"})
+            np=str(b.get("next",""))
+            if len(np)<8:return self.sendj(400,{"error":"8 أحرف على الأقل"})
+            salt=secrets.token_hex(16);execq("UPDATE admins SET password_hash=?,salt=? WHERE id=?",(h(np,salt),salt,a["id"]));conn.commit() if not PG else None;return self.sendj(200,{"ok":True})
+        if m=="GET" and p=="/api/admin/backup":
+            data={"exported_at":now(),"settings":rows("SELECT * FROM settings"),"participants":rows("SELECT id,name,code_hint,active,created_at FROM participants"),"players":rows("SELECT * FROM players"),"rounds":rows("SELECT * FROM rounds"),"lineups":rows("SELECT * FROM lineups"),"lineup_players":rows("SELECT * FROM lineup_players"),"events":rows("SELECT * FROM events")}
+            return self.sendj(200,data)
+        return self.sendj(404,{"error":"المسار غير موجود"})
+
+if __name__=="__main__":
+    print("Fantasy Dawair cloud on",PORT,"DB","PostgreSQL" if PG else "SQLite")
+    ThreadingHTTPServer((HOST,PORT),H).serve_forever()
