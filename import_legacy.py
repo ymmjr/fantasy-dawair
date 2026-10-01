@@ -82,6 +82,7 @@ def import_snapshot():
             cur.execute(f"SELECT COUNT(*) FROM {t}")
             counts[t]=cur.fetchone()[0]
         print("LEGACY IMPORT COMPLETE", counts)
+        conn.commit()
     except Exception:
         conn.rollback()
         raise
