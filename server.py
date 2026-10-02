@@ -203,9 +203,12 @@ class H(BaseHTTPRequestHandler):
             if not a or h(b.get("password",""),a["salt"])!=a["password_hash"]:return self.sendj(401,{"error":"بيانات الدخول غير صحيحة"})
             t=self.new_session({"role":"admin","id":a["id"],"name":a["username"]});return self.sendj(200,{"ok":True},f"sid={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
         if m=="POST" and p=="/api/login/participant":
-            b=self.body();un=norm_username(b.get("username",""));code=h(str(b.get("code","")).strip().upper(),"dawair-participant-v1")
-            u=row("SELECT id,name,username FROM participants WHERE username=? AND code_hash=? AND active=1",(un,code)) if un else row("SELECT id,name,username FROM participants WHERE code_hash=? AND active=1",(code,))
+            b=self.body();un=norm_username(b.get("username",""));raw_code=str(b.get("code","")).strip();code=h(raw_code.upper(),"dawair-participant-v1")
+            u=row("SELECT id,name,username,code_ciphertext FROM participants WHERE username=? AND code_hash=? AND active=1",(un,code)) if un else row("SELECT id,name,username,code_ciphertext FROM participants WHERE code_hash=? AND active=1",(code,))
             if not u:return self.sendj(401,{"error":"اسم المستخدم أو رمز الدخول غير صحيح"})
+            if not u.get("code_ciphertext") and CODE_CIPHER:
+                execq("UPDATE participants SET code_ciphertext=? WHERE id=?",(enc_code(raw_code),u["id"]))
+                if not PG:conn.commit()
             t=self.new_session({"role":"participant","id":u["id"],"name":u["name"],"username":u.get("username")});return self.sendj(200,{"ok":True},f"sid={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
         if m=="POST" and p=="/api/logout":SESS.pop(self.cookies().get("sid"),None);return self.sendj(200,{"ok":True},"sid=; Path=/; Max-Age=0")
         if m=="GET" and p=="/api/me":
