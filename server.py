@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, json, time, secrets, hashlib, sqlite3, threading, mimetypes, urllib.parse, http.cookies, re
+import os, json, time, secrets, hashlib, sqlite3, threading, mimetypes, urllib.parse, http.cookies, re, base64, binascii
 from pathlib import Path
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -55,6 +55,16 @@ def dec_code(v):
     except InvalidToken:return None
 def norm_username(v): return re.sub(r"\s+"," ",str(v or "").strip()).lower()
 def valid_username(v): return 3<=len(v)<=32 and bool(re.fullmatch(r"[\w.-]+(?: [\w.-]+)*",v,re.UNICODE))
+def clean_profile_image(v):
+    if v in (None,""):return None
+    v=str(v).strip()
+    m=re.fullmatch(r"data:image/(jpeg|png|webp);base64,([A-Za-z0-9+/=\r\n]+)",v)
+    if not m:raise ValueError("صيغة الصورة غير مدعومة")
+    try:data=base64.b64decode(m.group(2),validate=True)
+    except (binascii.Error,ValueError):raise ValueError("بيانات الصورة غير صالحة")
+    if len(data)>550_000:raise ValueError("حجم الصورة كبير؛ الحد الأقصى 550KB بعد المعالجة")
+    if len(data)<100:raise ValueError("الصورة غير صالحة")
+    return "data:image/"+m.group(1)+";base64,"+base64.b64encode(data).decode()
 def has_col(table,col):
     if PG:return bool(row("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=? AND column_name=?",(table,col)))
     return any(x["name"]==col for x in rows(f"PRAGMA table_info({table})"))
@@ -81,6 +91,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
         # v2: participant usernames + one-to-one participant/player linking.
         if not has_col("participants","username"): execq("ALTER TABLE participants ADD COLUMN username TEXT")
         if not has_col("participants","code_ciphertext"): execq("ALTER TABLE participants ADD COLUMN code_ciphertext TEXT")
+        if not has_col("participants","profile_image"): execq("ALTER TABLE participants ADD COLUMN profile_image TEXT")
         if not has_col("players","participant_id"): execq("ALTER TABLE players ADD COLUMN participant_id BIGINT")
         for u in rows("SELECT id FROM participants WHERE username IS NULL OR TRIM(username)='' ORDER BY id"):
             execq("UPDATE participants SET username=? WHERE id=?",(f"user{u['id']}",u["id"]))
@@ -96,6 +107,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(1,?) ON CONFLICT(version) DO NOTHING",(now(),))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(2,?) ON CONFLICT(version) DO NOTHING",(now(),))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(3,?) ON CONFLICT(version) DO NOTHING",(now(),))
+        execq("INSERT INTO schema_migrations(version,applied_at) VALUES(4,?) ON CONFLICT(version) DO NOTHING",(now(),))
         if val("SELECT COUNT(*) FROM admins")==0:
             user=os.getenv("ADMIN_USERNAME","admin")
             pw=os.getenv("ADMIN_PASSWORD","").strip() or secrets.token_urlsafe(16)
@@ -147,10 +159,10 @@ def score(pid,rid):
 def leaderboard(rid=0):
     rs=rows("SELECT id FROM rounds WHERE status IN ('open','locked','scored') ORDER BY number")
     out=[]
-    for p in rows("SELECT id,name FROM participants WHERE active=1 ORDER BY name"):
+    for p in rows("SELECT id,name,profile_image FROM participants WHERE active=1 ORDER BY name"):
         total=sum(score(p["id"],r["id"]) for r in rs)
         rp=score(p["id"],rid) if rid else None
-        out.append({"id":p["id"],"name":p["name"],"total_points":total,"round_points":rp})
+        out.append({"id":p["id"],"name":p["name"],"profile_image":p.get("profile_image"),"total_points":total,"round_points":rp})
     out.sort(key=lambda x:(-(x["round_points"] if rid else x["total_points"]),-x["total_points"],x["name"]))
     for n,x in enumerate(out,1):x["rank"]=n
     return out
@@ -217,7 +229,7 @@ class H(BaseHTTPRequestHandler):
         if not a:return
         if m=="GET" and p=="/api/bootstrap":
             rr=rows("SELECT * FROM rounds ORDER BY number DESC");cur=next((x for x in rr if x["status"]=="open"),rr[0] if rr else None)
-            out={"settings":settings(),"players":rows("SELECT id,name,group_no FROM players WHERE active=1 ORDER BY group_no,name"),"rounds":rr,"current_round":cur}
+            out={"settings":settings(),"players":rows("SELECT p.id,p.name,p.group_no,u.profile_image FROM players p LEFT JOIN participants u ON u.id=p.participant_id WHERE p.active=1 ORDER BY p.group_no,p.name"),"rounds":rr,"current_round":cur}
             if a["role"]=="participant":
                 out["lineup"]=lineup(a["id"],cur["id"]) if cur else None;out["used_chips"]=used_chips(a["id"]);out["leaderboard"]=leaderboard(cur["id"] if cur else 0)
             return self.sendj(200,out)
@@ -247,6 +259,17 @@ class H(BaseHTTPRequestHandler):
                 for x in items:execq("INSERT INTO lineup_players(lineup_id,player_id,role,bench_order) VALUES(?,?,?,?)",(lid,i(x["player_id"]),x["role"],i(x.get("bench_order"))))
                 if not PG:conn.commit()
                 return self.sendj(200,{"ok":True})
+        if p=="/api/account/profile" and a["role"]=="participant":
+            if m=="GET":
+                prof=row("SELECT u.id,u.name,u.username,u.profile_image,p.id player_id,p.group_no FROM participants u LEFT JOIN players p ON p.participant_id=u.id WHERE u.id=?",(a["id"],))
+                return self.sendj(200,prof or {})
+            if m=="PUT":
+                b=self.body()
+                try:img=clean_profile_image(b.get("image"))
+                except ValueError as e:return self.sendj(400,{"error":str(e)})
+                execq("UPDATE participants SET profile_image=? WHERE id=?",(img,a["id"]))
+                if not PG:conn.commit()
+                return self.sendj(200,{"ok":True,"profile_image":img})
         if m=="PUT" and p=="/api/account/code" and a["role"]=="participant":
             b=self.body();cur=row("SELECT code_hash FROM participants WHERE id=? AND active=1",(a["id"],))
             current=str(b.get("current","")).strip();new=str(b.get("next","")).strip();confirm=str(b.get("confirm","")).strip()
@@ -294,7 +317,7 @@ class H(BaseHTTPRequestHandler):
             if not PG:conn.commit()
             return self.sendj(200,{"ok":True})
         if m=="GET" and p=="/api/admin/players":
-            return self.sendj(200,rows("SELECT p.id,p.name,p.group_no,p.active,p.participant_id,u.username,u.name participant_name FROM players p LEFT JOIN participants u ON u.id=p.participant_id ORDER BY p.group_no,p.name"))
+            return self.sendj(200,rows("SELECT p.id,p.name,p.group_no,p.active,p.participant_id,u.username,u.name participant_name,u.profile_image FROM players p LEFT JOIN participants u ON u.id=p.participant_id ORDER BY p.group_no,p.name"))
         if m=="POST" and p=="/api/admin/players":
             b=self.body();g=i(b.get("group_no"));name=str(b.get("name","")).strip()
             if not name or g not in (1,2,3,4):return self.sendj(400,{"error":"بيانات اللاعب غير صحيحة"})
@@ -367,7 +390,7 @@ class H(BaseHTTPRequestHandler):
             if len(np)<8:return self.sendj(400,{"error":"8 أحرف على الأقل"})
             salt=secrets.token_hex(16);execq("UPDATE admins SET password_hash=?,salt=? WHERE id=?",(h(np,salt),salt,a["id"]));conn.commit() if not PG else None;return self.sendj(200,{"ok":True})
         if m=="GET" and p=="/api/admin/backup":
-            data={"exported_at":now(),"settings":rows("SELECT * FROM settings"),"participants":rows("SELECT id,name,code_hint,active,created_at FROM participants"),"players":rows("SELECT * FROM players"),"rounds":rows("SELECT * FROM rounds"),"lineups":rows("SELECT * FROM lineups"),"lineup_players":rows("SELECT * FROM lineup_players"),"events":rows("SELECT * FROM events")}
+            data={"exported_at":now(),"settings":rows("SELECT * FROM settings"),"participants":rows("SELECT id,name,username,code_hint,profile_image,active,created_at FROM participants"),"players":rows("SELECT * FROM players"),"rounds":rows("SELECT * FROM rounds"),"lineups":rows("SELECT * FROM lineups"),"lineup_players":rows("SELECT * FROM lineup_players"),"events":rows("SELECT * FROM events")}
             return self.sendj(200,data)
         return self.sendj(404,{"error":"المسار غير موجود"})
 
