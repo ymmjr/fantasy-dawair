@@ -234,26 +234,71 @@ class H(BaseHTTPRequestHandler):
                 return self.sendj(200,{"ok":True})
         if a["role"]!="admin":return self.sendj(403,{"error":"خاص بالمشرف"})
         if m=="GET" and p=="/api/admin/dashboard":return self.sendj(200,{"players":val("SELECT COUNT(*) FROM players WHERE active=1"),"participants":val("SELECT COUNT(*) FROM participants WHERE active=1"),"rounds":val("SELECT COUNT(*) FROM rounds"),"lineups":val("SELECT COUNT(*) FROM lineups"),"leaderboard":leaderboard()[:10]})
-        if m=="GET" and p=="/api/admin/participants":return self.sendj(200,rows("SELECT id,name,code_hint,active FROM participants ORDER BY name"))
+        if m=="GET" and p=="/api/admin/participants":
+            return self.sendj(200,rows("SELECT u.id,u.name,u.username,u.code_hint,u.active,p.id player_id,p.name player_name FROM participants u LEFT JOIN players p ON p.participant_id=u.id ORDER BY u.name"))
         if m=="POST" and p=="/api/admin/participants":
-            b=self.body();code=str(b.get("code","")).strip()
+            b=self.body();code=str(b.get("code","")).strip();un=norm_username(b.get("username",""));name=str(b.get("name","")).strip();pid=i(b.get("player_id"))
+            if not valid_username(un):return self.sendj(400,{"error":"اليوزر يجب أن يكون 3-32 حرفاً بدون مسافات"})
+            if len(code)<4:return self.sendj(400,{"error":"رمز الدخول يجب أن يكون 4 أحرف على الأقل"})
+            if row("SELECT id FROM participants WHERE username=?",(un,)):return self.sendj(400,{"error":"اليوزر مستخدم بالفعل"})
+            if pid:
+                pl=row("SELECT id,name,participant_id FROM players WHERE id=?",(pid,))
+                if not pl:return self.sendj(400,{"error":"اللاعب غير موجود"})
+                if pl.get("participant_id"):return self.sendj(400,{"error":"هذا اللاعب مربوط بحساب بالفعل"})
+                name=pl["name"]
+            if not name:return self.sendj(400,{"error":"اسم المشترك مطلوب"})
             try:
-                uid=insert_id("INSERT INTO participants(name,code_hash,code_hint,active,created_at) VALUES(?,?,?,1,?)",(str(b.get("name","")).strip(),h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),now()));return self.sendj(200,{"ok":True,"id":uid})
-            except:return self.sendj(400,{"error":"الاسم/الرمز غير صالح أو مستخدم"})
+                uid=insert_id("INSERT INTO participants(name,username,code_hash,code_hint,active,created_at) VALUES(?,?,?,?,1,?)",(name,un,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),now()))
+                if pid:execq("UPDATE players SET participant_id=? WHERE id=?",(uid,pid))
+                if not PG:conn.commit()
+                return self.sendj(200,{"ok":True,"id":uid,"username":un})
+            except:return self.sendj(400,{"error":"تعذر إنشاء الحساب؛ تحقق من اليوزر ورمز الدخول"})
         if len(parts)==4 and parts[:3]==["api","admin","participants"] and m=="PUT":
-            b=self.body();uid=i(parts[3]);name=str(b.get("name","")).strip();active=1 if b.get("active") else 0
+            b=self.body();uid=i(parts[3]);cur=row("SELECT * FROM participants WHERE id=?",(uid,))
+            if not cur:return self.sendj(404,{"error":"الحساب غير موجود"})
+            name=str(b.get("name",cur["name"])).strip();un=norm_username(b.get("username",cur.get("username") or ""));active=1 if b.get("active",bool(cur["active"])) else 0
+            if not name or not valid_username(un):return self.sendj(400,{"error":"الاسم أو اليوزر غير صالح"})
+            if row("SELECT id FROM participants WHERE username=? AND id<>?",(un,uid)):return self.sendj(400,{"error":"اليوزر مستخدم بالفعل"})
             if b.get("code"):
-                c=str(b["code"]).strip();execq("UPDATE participants SET name=?,active=?,code_hash=?,code_hint=? WHERE id=?",(name,active,h(c.upper(),"dawair-participant-v1"),c[-3:].upper(),uid))
-            else:execq("UPDATE participants SET name=?,active=? WHERE id=?",(name,active,uid))
+                code=str(b["code"]).strip()
+                if len(code)<4:return self.sendj(400,{"error":"رمز الدخول يجب أن يكون 4 أحرف على الأقل"})
+                execq("UPDATE participants SET name=?,username=?,active=?,code_hash=?,code_hint=? WHERE id=?",(name,un,active,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),uid))
+            else:execq("UPDATE participants SET name=?,username=?,active=? WHERE id=?",(name,un,active,uid))
+            execq("UPDATE players SET name=? WHERE participant_id=?",(name,uid))
             if not PG:conn.commit()
             return self.sendj(200,{"ok":True})
-        if m=="GET" and p=="/api/admin/players":return self.sendj(200,rows("SELECT id,name,group_no,active FROM players ORDER BY group_no,name"))
+        if m=="GET" and p=="/api/admin/players":
+            return self.sendj(200,rows("SELECT p.id,p.name,p.group_no,p.active,p.participant_id,u.username,u.name participant_name FROM players p LEFT JOIN participants u ON u.id=p.participant_id ORDER BY p.group_no,p.name"))
         if m=="POST" and p=="/api/admin/players":
             b=self.body();g=i(b.get("group_no"));name=str(b.get("name","")).strip()
             if not name or g not in (1,2,3,4):return self.sendj(400,{"error":"بيانات اللاعب غير صحيحة"})
             return self.sendj(200,{"ok":True,"id":insert_id("INSERT INTO players(name,group_no,active,created_at) VALUES(?,?,1,?)",(name,g,now()))})
+        if len(parts)==5 and parts[:3]==["api","admin","players"] and parts[4]=="account" and m=="POST":
+            pid=i(parts[3]);pl=row("SELECT id,name,participant_id FROM players WHERE id=?",(pid,));b=self.body()
+            if not pl:return self.sendj(404,{"error":"اللاعب غير موجود"})
+            if pl.get("participant_id"):return self.sendj(400,{"error":"اللاعب مربوط بحساب بالفعل"})
+            un=norm_username(b.get("username",""));code=str(b.get("code","")).strip()
+            if not valid_username(un):return self.sendj(400,{"error":"اليوزر يجب أن يكون 3-32 حرفاً بدون مسافات"})
+            if len(code)<4:return self.sendj(400,{"error":"رمز الدخول يجب أن يكون 4 أحرف على الأقل"})
+            if row("SELECT id FROM participants WHERE username=?",(un,)):return self.sendj(400,{"error":"اليوزر مستخدم بالفعل"})
+            uid=insert_id("INSERT INTO participants(name,username,code_hash,code_hint,active,created_at) VALUES(?,?,?,?,1,?)",(pl["name"],un,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),now()))
+            execq("UPDATE players SET participant_id=? WHERE id=?",(uid,pid))
+            if not PG:conn.commit()
+            return self.sendj(200,{"ok":True,"participant_id":uid,"username":un})
         if len(parts)==4 and parts[:3]==["api","admin","players"] and m=="PUT":
-            b=self.body();execq("UPDATE players SET name=?,group_no=?,active=? WHERE id=?",(b.get("name",""),i(b.get("group_no")),1 if b.get("active") else 0,i(parts[3])));conn.commit() if not PG else None;return self.sendj(200,{"ok":True})
+            b=self.body();pid=i(parts[3]);cur=row("SELECT * FROM players WHERE id=?",(pid,))
+            if not cur:return self.sendj(404,{"error":"اللاعب غير موجود"})
+            name=str(b.get("name",cur["name"])).strip();g=i(b.get("group_no",cur["group_no"]));active=1 if b.get("active",bool(cur["active"])) else 0
+            link=i(b.get("participant_id",cur.get("participant_id") or 0))
+            if not name or g not in (1,2,3,4):return self.sendj(400,{"error":"بيانات اللاعب غير صحيحة"})
+            if link:
+                u=row("SELECT id FROM participants WHERE id=?",(link,))
+                if not u:return self.sendj(400,{"error":"الحساب غير موجود"})
+                if row("SELECT id FROM players WHERE participant_id=? AND id<>?",(link,pid)):return self.sendj(400,{"error":"الحساب مربوط بلاعب آخر"})
+            execq("UPDATE players SET name=?,group_no=?,active=?,participant_id=? WHERE id=?",(name,g,active,link or None,pid))
+            if link:execq("UPDATE participants SET name=? WHERE id=?",(name,link))
+            if not PG:conn.commit()
+            return self.sendj(200,{"ok":True})
         if m=="GET" and p=="/api/rounds":return self.sendj(200,rows("SELECT * FROM rounds ORDER BY number DESC"))
         if m=="POST" and p=="/api/admin/rounds":
             b=self.body();num=i(b.get("number"));return self.sendj(200,{"ok":True,"id":insert_id("INSERT INTO rounds(number,name,status,created_at) VALUES(?,?,?,?)",(num,b.get("name") or f"الجولة {num}",b.get("status") or "draft",now()))})
