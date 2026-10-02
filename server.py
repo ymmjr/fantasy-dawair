@@ -191,12 +191,13 @@ class H(BaseHTTPRequestHandler):
             if not a or h(b.get("password",""),a["salt"])!=a["password_hash"]:return self.sendj(401,{"error":"بيانات الدخول غير صحيحة"})
             t=self.new_session({"role":"admin","id":a["id"],"name":a["username"]});return self.sendj(200,{"ok":True},f"sid={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
         if m=="POST" and p=="/api/login/participant":
-            b=self.body();code=h(str(b.get("code","")).strip().upper(),"dawair-participant-v1");u=row("SELECT id,name FROM participants WHERE code_hash=? AND active=1",(code,))
-            if not u:return self.sendj(401,{"error":"رمز الدخول غير صحيح"})
-            t=self.new_session({"role":"participant","id":u["id"],"name":u["name"]});return self.sendj(200,{"ok":True},f"sid={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
+            b=self.body();un=norm_username(b.get("username",""));code=h(str(b.get("code","")).strip().upper(),"dawair-participant-v1")
+            u=row("SELECT id,name,username FROM participants WHERE username=? AND code_hash=? AND active=1",(un,code)) if un else row("SELECT id,name,username FROM participants WHERE code_hash=? AND active=1",(code,))
+            if not u:return self.sendj(401,{"error":"اسم المستخدم أو رمز الدخول غير صحيح"})
+            t=self.new_session({"role":"participant","id":u["id"],"name":u["name"],"username":u.get("username")});return self.sendj(200,{"ok":True},f"sid={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
         if m=="POST" and p=="/api/logout":SESS.pop(self.cookies().get("sid"),None);return self.sendj(200,{"ok":True},"sid=; Path=/; Max-Age=0")
         if m=="GET" and p=="/api/me":
-            s=self.sess();return self.sendj(200,{"authenticated":False} if not s else {"authenticated":True,"role":s["role"],"id":s["id"],"name":s["name"]})
+            s=self.sess();return self.sendj(200,{"authenticated":False} if not s else {"authenticated":True,"role":s["role"],"id":s["id"],"name":s["name"],"username":s.get("username")})
         a=self.auth()
         if not a:return
         if m=="GET" and p=="/api/bootstrap":
