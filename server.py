@@ -133,7 +133,7 @@ def raw(e,s=None):
 
 def lineup(pid,rid):
     l=row("SELECT * FROM lineups WHERE participant_id=? AND round_id=?",(pid,rid))
-    if l:l["players"]=rows("SELECT lp.*,p.name,p.group_no FROM lineup_players lp JOIN players p ON p.id=lp.player_id WHERE lp.lineup_id=? ORDER BY CASE lp.role WHEN 'starter' THEN 0 ELSE 1 END,lp.bench_order",(l["id"],))
+    if l:l["players"]=rows("SELECT lp.*,p.name,p.group_no,u.profile_image FROM lineup_players lp JOIN players p ON p.id=lp.player_id LEFT JOIN participants u ON u.id=p.participant_id WHERE lp.lineup_id=? ORDER BY CASE lp.role WHEN 'starter' THEN 0 ELSE 1 END,lp.bench_order",(l["id"],))
     return l
 
 def used_chips(pid,exclude=0):
@@ -281,6 +281,14 @@ class H(BaseHTTPRequestHandler):
             return self.sendj(200,{"ok":True})
         if a["role"]!="admin":return self.sendj(403,{"error":"خاص بالمشرف"})
         if m=="GET" and p=="/api/admin/dashboard":return self.sendj(200,{"players":val("SELECT COUNT(*) FROM players WHERE active=1"),"participants":val("SELECT COUNT(*) FROM participants WHERE active=1"),"rounds":val("SELECT COUNT(*) FROM rounds"),"lineups":val("SELECT COUNT(*) FROM lineups"),"leaderboard":leaderboard()[:10]})
+        if len(parts)==4 and parts[:3]==["api","admin","lineups"] and m=="GET":
+            rid=i(parts[3]);rnd=row("SELECT id,number,name,status FROM rounds WHERE id=?",(rid,))
+            if not rnd:return self.sendj(404,{"error":"الجولة غير موجودة"})
+            out=[]
+            for u in rows("SELECT id,name,username,profile_image,active FROM participants ORDER BY name"):
+                l=lineup(u["id"],rid)
+                out.append({"participant":u,"lineup":l,"score":score(u["id"],rid) if l else 0})
+            return self.sendj(200,{"round":rnd,"items":out})
         if m=="GET" and p=="/api/admin/participants":
             items=rows("SELECT u.id,u.name,u.username,u.code_hint,u.code_ciphertext,u.active,p.id player_id,p.name player_name FROM participants u LEFT JOIN players p ON p.participant_id=u.id ORDER BY u.name")
             for x in items:x["code_full"]=dec_code(x.pop("code_ciphertext",None))
