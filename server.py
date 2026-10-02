@@ -3,6 +3,7 @@ import os, json, time, secrets, hashlib, sqlite3, threading, mimetypes, urllib.p
 from pathlib import Path
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from cryptography.fernet import Fernet, InvalidToken
 
 ROOT=Path(__file__).resolve().parent
 PUBLIC=ROOT/"public"; DATA=ROOT/"data"; DATA.mkdir(exist_ok=True)
@@ -10,6 +11,8 @@ PORT=int(os.getenv("PORT","3000")); HOST=os.getenv("HOST","0.0.0.0")
 DATABASE_URL=os.getenv("DATABASE_URL","").strip()
 PG=DATABASE_URL.startswith(("postgres://","postgresql://"))
 LOCK=threading.RLock(); SESS={}; SESSION_TTL=7*24*3600
+CODE_KEY=os.getenv("PARTICIPANT_CODE_KEY","").strip()
+CODE_CIPHER=Fernet(CODE_KEY.encode()) if CODE_KEY else None
 
 if PG:
     import psycopg2
@@ -43,6 +46,13 @@ def i(v,d=0):
     except:return d
 def h(secret,salt):
     return hashlib.scrypt(str(secret).encode(),salt=str(salt).encode(),n=16384,r=8,p=1,dklen=32).hex()
+def enc_code(v):
+    if not CODE_CIPHER: raise RuntimeError("PARTICIPANT_CODE_KEY is not configured")
+    return CODE_CIPHER.encrypt(str(v).encode()).decode()
+def dec_code(v):
+    if not v or not CODE_CIPHER:return None
+    try:return CODE_CIPHER.decrypt(str(v).encode()).decode()
+    except InvalidToken:return None
 def norm_username(v): return re.sub(r"\s+"," ",str(v or "").strip()).lower()
 def valid_username(v): return 3<=len(v)<=32 and bool(re.fullmatch(r"[\w.-]+(?: [\w.-]+)*",v,re.UNICODE))
 def has_col(table,col):
@@ -70,6 +80,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
         else: conn.executescript(schema)
         # v2: participant usernames + one-to-one participant/player linking.
         if not has_col("participants","username"): execq("ALTER TABLE participants ADD COLUMN username TEXT")
+        if not has_col("participants","code_ciphertext"): execq("ALTER TABLE participants ADD COLUMN code_ciphertext TEXT")
         if not has_col("players","participant_id"): execq("ALTER TABLE players ADD COLUMN participant_id BIGINT")
         for u in rows("SELECT id FROM participants WHERE username IS NULL OR TRIM(username)='' ORDER BY id"):
             execq("UPDATE participants SET username=? WHERE id=?",(f"user{u['id']}",u["id"]))
@@ -84,6 +95,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
         for k,v in defaults.items(): execq("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING",(k,v))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(1,?) ON CONFLICT(version) DO NOTHING",(now(),))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(2,?) ON CONFLICT(version) DO NOTHING",(now(),))
+        execq("INSERT INTO schema_migrations(version,applied_at) VALUES(3,?) ON CONFLICT(version) DO NOTHING",(now(),))
         if val("SELECT COUNT(*) FROM admins")==0:
             user=os.getenv("ADMIN_USERNAME","admin")
             pw=os.getenv("ADMIN_PASSWORD","").strip() or secrets.token_urlsafe(16)
@@ -191,9 +203,12 @@ class H(BaseHTTPRequestHandler):
             if not a or h(b.get("password",""),a["salt"])!=a["password_hash"]:return self.sendj(401,{"error":"بيانات الدخول غير صحيحة"})
             t=self.new_session({"role":"admin","id":a["id"],"name":a["username"]});return self.sendj(200,{"ok":True},f"sid={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
         if m=="POST" and p=="/api/login/participant":
-            b=self.body();un=norm_username(b.get("username",""));code=h(str(b.get("code","")).strip().upper(),"dawair-participant-v1")
-            u=row("SELECT id,name,username FROM participants WHERE username=? AND code_hash=? AND active=1",(un,code)) if un else row("SELECT id,name,username FROM participants WHERE code_hash=? AND active=1",(code,))
+            b=self.body();un=norm_username(b.get("username",""));raw_code=str(b.get("code","")).strip();code=h(raw_code.upper(),"dawair-participant-v1")
+            u=row("SELECT id,name,username,code_ciphertext FROM participants WHERE username=? AND code_hash=? AND active=1",(un,code)) if un else row("SELECT id,name,username,code_ciphertext FROM participants WHERE code_hash=? AND active=1",(code,))
             if not u:return self.sendj(401,{"error":"اسم المستخدم أو رمز الدخول غير صحيح"})
+            if not u.get("code_ciphertext") and CODE_CIPHER:
+                execq("UPDATE participants SET code_ciphertext=? WHERE id=?",(enc_code(raw_code),u["id"]))
+                if not PG:conn.commit()
             t=self.new_session({"role":"participant","id":u["id"],"name":u["name"],"username":u.get("username")});return self.sendj(200,{"ok":True},f"sid={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
         if m=="POST" and p=="/api/logout":SESS.pop(self.cookies().get("sid"),None);return self.sendj(200,{"ok":True},"sid=; Path=/; Max-Age=0")
         if m=="GET" and p=="/api/me":
@@ -232,10 +247,21 @@ class H(BaseHTTPRequestHandler):
                 for x in items:execq("INSERT INTO lineup_players(lineup_id,player_id,role,bench_order) VALUES(?,?,?,?)",(lid,i(x["player_id"]),x["role"],i(x.get("bench_order"))))
                 if not PG:conn.commit()
                 return self.sendj(200,{"ok":True})
+        if m=="PUT" and p=="/api/account/code" and a["role"]=="participant":
+            b=self.body();cur=row("SELECT code_hash FROM participants WHERE id=? AND active=1",(a["id"],))
+            current=str(b.get("current","")).strip();new=str(b.get("next","")).strip();confirm=str(b.get("confirm","")).strip()
+            if not cur or h(current.upper(),"dawair-participant-v1")!=cur["code_hash"]:return self.sendj(400,{"error":"رمز الدخول الحالي غير صحيح"})
+            if len(new)<4:return self.sendj(400,{"error":"رمز الدخول الجديد يجب أن يكون 4 أحرف على الأقل"})
+            if new!=confirm:return self.sendj(400,{"error":"تأكيد رمز الدخول غير مطابق"})
+            execq("UPDATE participants SET code_hash=?,code_hint=?,code_ciphertext=? WHERE id=?",(h(new.upper(),"dawair-participant-v1"),new[-3:].upper(),enc_code(new),a["id"]))
+            if not PG:conn.commit()
+            return self.sendj(200,{"ok":True})
         if a["role"]!="admin":return self.sendj(403,{"error":"خاص بالمشرف"})
         if m=="GET" and p=="/api/admin/dashboard":return self.sendj(200,{"players":val("SELECT COUNT(*) FROM players WHERE active=1"),"participants":val("SELECT COUNT(*) FROM participants WHERE active=1"),"rounds":val("SELECT COUNT(*) FROM rounds"),"lineups":val("SELECT COUNT(*) FROM lineups"),"leaderboard":leaderboard()[:10]})
         if m=="GET" and p=="/api/admin/participants":
-            return self.sendj(200,rows("SELECT u.id,u.name,u.username,u.code_hint,u.active,p.id player_id,p.name player_name FROM participants u LEFT JOIN players p ON p.participant_id=u.id ORDER BY u.name"))
+            items=rows("SELECT u.id,u.name,u.username,u.code_hint,u.code_ciphertext,u.active,p.id player_id,p.name player_name FROM participants u LEFT JOIN players p ON p.participant_id=u.id ORDER BY u.name")
+            for x in items:x["code_full"]=dec_code(x.pop("code_ciphertext",None))
+            return self.sendj(200,items)
         if m=="POST" and p=="/api/admin/participants":
             b=self.body();code=str(b.get("code","")).strip();un=norm_username(b.get("username",""));name=str(b.get("name","")).strip();pid=i(b.get("player_id"))
             if not valid_username(un):return self.sendj(400,{"error":"اليوزر يجب أن يكون 3-32 حرفاً، ويمكن أن يحتوي على مسافات داخلية"})
@@ -248,7 +274,7 @@ class H(BaseHTTPRequestHandler):
                 name=pl["name"]
             if not name:return self.sendj(400,{"error":"اسم المشترك مطلوب"})
             try:
-                uid=insert_id("INSERT INTO participants(name,username,code_hash,code_hint,active,created_at) VALUES(?,?,?,?,1,?)",(name,un,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),now()))
+                uid=insert_id("INSERT INTO participants(name,username,code_hash,code_hint,code_ciphertext,active,created_at) VALUES(?,?,?,?,?,1,?)",(name,un,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),enc_code(code),now()))
                 if pid:execq("UPDATE players SET participant_id=? WHERE id=?",(uid,pid))
                 if not PG:conn.commit()
                 return self.sendj(200,{"ok":True,"id":uid,"username":un})
@@ -262,7 +288,7 @@ class H(BaseHTTPRequestHandler):
             if b.get("code"):
                 code=str(b["code"]).strip()
                 if len(code)<4:return self.sendj(400,{"error":"رمز الدخول يجب أن يكون 4 أحرف على الأقل"})
-                execq("UPDATE participants SET name=?,username=?,active=?,code_hash=?,code_hint=? WHERE id=?",(name,un,active,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),uid))
+                execq("UPDATE participants SET name=?,username=?,active=?,code_hash=?,code_hint=?,code_ciphertext=? WHERE id=?",(name,un,active,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),enc_code(code),uid))
             else:execq("UPDATE participants SET name=?,username=?,active=? WHERE id=?",(name,un,active,uid))
             execq("UPDATE players SET name=? WHERE participant_id=?",(name,uid))
             if not PG:conn.commit()
@@ -296,7 +322,7 @@ class H(BaseHTTPRequestHandler):
             if not valid_username(un):return self.sendj(400,{"error":"اليوزر يجب أن يكون 3-32 حرفاً، ويمكن أن يحتوي على مسافات داخلية"})
             if len(code)<4:return self.sendj(400,{"error":"رمز الدخول يجب أن يكون 4 أحرف على الأقل"})
             if row("SELECT id FROM participants WHERE username=?",(un,)):return self.sendj(400,{"error":"اليوزر مستخدم بالفعل"})
-            uid=insert_id("INSERT INTO participants(name,username,code_hash,code_hint,active,created_at) VALUES(?,?,?,?,1,?)",(pl["name"],un,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),now()))
+            uid=insert_id("INSERT INTO participants(name,username,code_hash,code_hint,code_ciphertext,active,created_at) VALUES(?,?,?,?,?,1,?)",(pl["name"],un,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),enc_code(code),now()))
             execq("UPDATE players SET participant_id=? WHERE id=?",(uid,pid))
             if not PG:conn.commit()
             return self.sendj(200,{"ok":True,"participant_id":uid,"username":un})

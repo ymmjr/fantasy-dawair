@@ -47,6 +47,6 @@ jobs:
             sleep 0.5
           done
           curl -fsS http://127.0.0.1:3099/health
-          for route in / /login /dashboard /lineup /leaderboard /rules /admin/dashboard /admin/players /admin/participants /admin/rounds /admin/scores /admin/settings; do
+          for route in / /login /dashboard /lineup /leaderboard /rules /account /admin/dashboard /admin/players /admin/participants /admin/rounds /admin/scores /admin/settings; do
             curl -fsS "http://127.0.0.1:3099$route" | grep -q '<div id="app"></div>'
           done
