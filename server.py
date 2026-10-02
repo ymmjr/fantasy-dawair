@@ -229,7 +229,7 @@ class H(BaseHTTPRequestHandler):
         if not a:return
         if m=="GET" and p=="/api/bootstrap":
             rr=rows("SELECT * FROM rounds ORDER BY number DESC");cur=next((x for x in rr if x["status"]=="open"),rr[0] if rr else None)
-            out={"settings":settings(),"players":rows("SELECT p.id,p.name,p.group_no,u.profile_image FROM players p LEFT JOIN participants u ON u.id=p.participant_id WHERE p.active=1 ORDER BY p.group_no,p.name"),"rounds":rr,"current_round":cur}
+            out={"settings":settings(),"players":rows("SELECT p.id,p.name,p.group_no,u.profile_image,COALESCE((SELECT SUM(e.raw_points) FROM events e WHERE e.player_id=p.id),0) total_points FROM players p LEFT JOIN participants u ON u.id=p.participant_id WHERE p.active=1 ORDER BY p.group_no,p.name"),"rounds":rr,"current_round":cur}
             if a["role"]=="participant":
                 out["lineup"]=lineup(a["id"],cur["id"]) if cur else None;out["used_chips"]=used_chips(a["id"]);out["leaderboard"]=leaderboard(cur["id"] if cur else 0)
             return self.sendj(200,out)
