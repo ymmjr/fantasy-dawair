@@ -38,7 +38,7 @@ const routeForPath=path=>activeRoutes().find(x=>x.path===path);
 const isAuthorizedPath=path=>!!routeForPath(path);
 function navigate(path,replace=false){if(!S.me?.authenticated)return;history[replace?'replaceState':'pushState']({},'',path);renderRoute()}
 function show(key){let r=activeRoutes().find(x=>x.key===key);navigate(r?r.path:defaultPath())}
-async function renderRoute(){let r=routeForPath(location.pathname);if(!r){history.replaceState({},'',defaultPath());r=routeForPath(location.pathname)}S.page=r.key;$('#nav a').forEach(x=>x.classList.toggle('on',x.getAttribute('href')===r.path));document.title=r.label+' — فانتسي دوائر';await r.view()}
+async function renderRoute(){let r=routeForPath(location.pathname);if(!r){history.replaceState({},'',defaultPath());r=routeForPath(location.pathname)}S.page=r.key;[...document.querySelectorAll('#nav a')].forEach(x=>x.classList.toggle('on',x.getAttribute('href')===r.path));document.title=r.label+' — فانتسي دوائر';await r.view()}
 document.addEventListener('click',e=>{let a=e.target.closest('a[data-route]');if(!a||e.defaultPrevented||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;e.preventDefault();navigate(a.getAttribute('href'))});
 window.addEventListener('popstate',()=>{if(S.me?.authenticated)renderRoute();else{history.replaceState({},'','/login');login()}});
 async function start(){S.me=await api('/api/me');if(S.me.authenticated){if(location.pathname==='/'||location.pathname==='/login'||!isAuthorizedPath(location.pathname))history.replaceState({},'',defaultPath());await shell()}else{if(location.pathname!=='/'&&location.pathname!=='/login')S.pendingPath=location.pathname;history.replaceState({},'','/login');login()}}
