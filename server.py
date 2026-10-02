@@ -68,6 +68,13 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
             for s in schema.split(";"):
                 if s.strip(): c.execute(s)
         else: conn.executescript(schema)
+        # v2: participant usernames + one-to-one participant/player linking.
+        if not has_col("participants","username"): execq("ALTER TABLE participants ADD COLUMN username TEXT")
+        if not has_col("players","participant_id"): execq("ALTER TABLE players ADD COLUMN participant_id BIGINT")
+        for u in rows("SELECT id FROM participants WHERE username IS NULL OR TRIM(username)='' ORDER BY id"):
+            execq("UPDATE participants SET username=? WHERE id=?",(f"user{u['id']}",u["id"]))
+        execq("CREATE UNIQUE INDEX IF NOT EXISTS idx_participants_username ON participants(username)")
+        execq("CREATE UNIQUE INDEX IF NOT EXISTS idx_players_participant_id ON players(participant_id) WHERE participant_id IS NOT NULL")
         defaults={
           "site_name":"فانتسي دوائر","captain_multiplier":"2","free_transfers":"2",
           "points_goal":"3","points_win":"5","points_hattrick":"3","points_attendance":"3",
