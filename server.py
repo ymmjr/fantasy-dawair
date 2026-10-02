@@ -273,6 +273,21 @@ class H(BaseHTTPRequestHandler):
             b=self.body();g=i(b.get("group_no"));name=str(b.get("name","")).strip()
             if not name or g not in (1,2,3,4):return self.sendj(400,{"error":"بيانات اللاعب غير صحيحة"})
             return self.sendj(200,{"ok":True,"id":insert_id("INSERT INTO players(name,group_no,active,created_at) VALUES(?,?,1,?)",(name,g,now()))})
+        if len(parts)==5 and parts[:3]==["api","admin","players"] and parts[4]=="link" and m=="POST":
+            pid=i(parts[3]);pl=row("SELECT id,name FROM players WHERE id=?",(pid,));b=self.body()
+            if not pl:return self.sendj(404,{"error":"اللاعب غير موجود"})
+            un=norm_username(b.get("username",""))
+            if not un:
+                execq("UPDATE players SET participant_id=NULL WHERE id=?",(pid,))
+                if not PG:conn.commit()
+                return self.sendj(200,{"ok":True})
+            u=row("SELECT id,username FROM participants WHERE username=?",(un,))
+            if not u:return self.sendj(404,{"error":"لا يوجد حساب بهذا اليوزر"})
+            if row("SELECT id FROM players WHERE participant_id=? AND id<>?",(u["id"],pid)):return self.sendj(400,{"error":"هذا الحساب مربوط بلاعب آخر"})
+            execq("UPDATE players SET participant_id=? WHERE id=?",(u["id"],pid))
+            execq("UPDATE participants SET name=? WHERE id=?",(pl["name"],u["id"]))
+            if not PG:conn.commit()
+            return self.sendj(200,{"ok":True,"participant_id":u["id"],"username":u["username"]})
         if len(parts)==5 and parts[:3]==["api","admin","players"] and parts[4]=="account" and m=="POST":
             pid=i(parts[3]);pl=row("SELECT id,name,participant_id FROM players WHERE id=?",(pid,));b=self.body()
             if not pl:return self.sendj(404,{"error":"اللاعب غير موجود"})
