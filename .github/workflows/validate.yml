@@ -3,6 +3,8 @@ name: Validate Fantasy Dawair
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -13,22 +15,38 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - run: python -m py_compile server.py
       - run: pip install -r requirements.txt
-      - name: Smoke test SQLite fallback
+      - name: Validate frontend JavaScript syntax
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          html = Path("public/index.html").read_text(encoding="utf-8")
+          m = re.search(r"<script>\s*(.*?)\s*</script>", html, re.S)
+          if not m:
+              raise SystemExit("inline script not found")
+          Path("/tmp/fantasy-app.js").write_text(m.group(1), encoding="utf-8")
+          PY
+          node --check /tmp/fantasy-app.js
+      - name: Smoke test SQLite fallback and SPA routes
         env:
           ADMIN_PASSWORD: TestOnlyPassword123!
           PORT: "3099"
         run: |
           python server.py > /tmp/fantasy.log 2>&1 &
           PID=$!
+          trap 'kill $PID || true' EXIT
           for i in {1..20}; do
             if curl -fsS http://127.0.0.1:3099/health; then
-              kill $PID
-              exit 0
+              break
             fi
             sleep 0.5
           done
-          cat /tmp/fantasy.log
-          kill $PID || true
-          exit 1
+          curl -fsS http://127.0.0.1:3099/health
+          for route in / /login /dashboard /lineup /leaderboard /rules /admin/dashboard /admin/players /admin/participants /admin/rounds /admin/scores /admin/settings; do
+            curl -fsS "http://127.0.0.1:3099$route" | grep -q '<div id="app"></div>'
+          done
