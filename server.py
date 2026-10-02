@@ -43,8 +43,8 @@ def i(v,d=0):
     except:return d
 def h(secret,salt):
     return hashlib.scrypt(str(secret).encode(),salt=str(salt).encode(),n=16384,r=8,p=1,dklen=32).hex()
-def norm_username(v): return str(v or "").strip().lower()
-def valid_username(v): return bool(re.fullmatch(r"[\w.-]{3,32}",v,re.UNICODE))
+def norm_username(v): return re.sub(r"\s+"," ",str(v or "").strip()).lower()
+def valid_username(v): return 3<=len(v)<=32 and bool(re.fullmatch(r"[\w.-]+(?: [\w.-]+)*",v,re.UNICODE))
 def has_col(table,col):
     if PG:return bool(row("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=? AND column_name=?",(table,col)))
     return any(x["name"]==col for x in rows(f"PRAGMA table_info({table})"))
@@ -238,7 +238,7 @@ class H(BaseHTTPRequestHandler):
             return self.sendj(200,rows("SELECT u.id,u.name,u.username,u.code_hint,u.active,p.id player_id,p.name player_name FROM participants u LEFT JOIN players p ON p.participant_id=u.id ORDER BY u.name"))
         if m=="POST" and p=="/api/admin/participants":
             b=self.body();code=str(b.get("code","")).strip();un=norm_username(b.get("username",""));name=str(b.get("name","")).strip();pid=i(b.get("player_id"))
-            if not valid_username(un):return self.sendj(400,{"error":"اليوزر يجب أن يكون 3-32 حرفاً بدون مسافات"})
+            if not valid_username(un):return self.sendj(400,{"error":"اليوزر يجب أن يكون 3-32 حرفاً، ويمكن أن يحتوي على مسافات داخلية"})
             if len(code)<4:return self.sendj(400,{"error":"رمز الدخول يجب أن يكون 4 أحرف على الأقل"})
             if row("SELECT id FROM participants WHERE username=?",(un,)):return self.sendj(400,{"error":"اليوزر مستخدم بالفعل"})
             if pid:
@@ -293,7 +293,7 @@ class H(BaseHTTPRequestHandler):
             if not pl:return self.sendj(404,{"error":"اللاعب غير موجود"})
             if pl.get("participant_id"):return self.sendj(400,{"error":"اللاعب مربوط بحساب بالفعل"})
             un=norm_username(b.get("username",""));code=str(b.get("code","")).strip()
-            if not valid_username(un):return self.sendj(400,{"error":"اليوزر يجب أن يكون 3-32 حرفاً بدون مسافات"})
+            if not valid_username(un):return self.sendj(400,{"error":"اليوزر يجب أن يكون 3-32 حرفاً، ويمكن أن يحتوي على مسافات داخلية"})
             if len(code)<4:return self.sendj(400,{"error":"رمز الدخول يجب أن يكون 4 أحرف على الأقل"})
             if row("SELECT id FROM participants WHERE username=?",(un,)):return self.sendj(400,{"error":"اليوزر مستخدم بالفعل"})
             uid=insert_id("INSERT INTO participants(name,username,code_hash,code_hint,active,created_at) VALUES(?,?,?,?,1,?)",(pl["name"],un,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),now()))
