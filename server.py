@@ -3,6 +3,7 @@ import os, json, time, secrets, hashlib, sqlite3, threading, mimetypes, urllib.p
 from pathlib import Path
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from cryptography.fernet import Fernet, InvalidToken
 
 ROOT=Path(__file__).resolve().parent
 PUBLIC=ROOT/"public"; DATA=ROOT/"data"; DATA.mkdir(exist_ok=True)
@@ -10,6 +11,8 @@ PORT=int(os.getenv("PORT","3000")); HOST=os.getenv("HOST","0.0.0.0")
 DATABASE_URL=os.getenv("DATABASE_URL","").strip()
 PG=DATABASE_URL.startswith(("postgres://","postgresql://"))
 LOCK=threading.RLock(); SESS={}; SESSION_TTL=7*24*3600
+CODE_KEY=os.getenv("PARTICIPANT_CODE_KEY","").strip()
+CODE_CIPHER=Fernet(CODE_KEY.encode()) if CODE_KEY else None
 
 if PG:
     import psycopg2
@@ -43,6 +46,13 @@ def i(v,d=0):
     except:return d
 def h(secret,salt):
     return hashlib.scrypt(str(secret).encode(),salt=str(salt).encode(),n=16384,r=8,p=1,dklen=32).hex()
+def enc_code(v):
+    if not CODE_CIPHER: raise RuntimeError("PARTICIPANT_CODE_KEY is not configured")
+    return CODE_CIPHER.encrypt(str(v).encode()).decode()
+def dec_code(v):
+    if not v or not CODE_CIPHER:return None
+    try:return CODE_CIPHER.decrypt(str(v).encode()).decode()
+    except InvalidToken:return None
 def norm_username(v): return re.sub(r"\s+"," ",str(v or "").strip()).lower()
 def valid_username(v): return 3<=len(v)<=32 and bool(re.fullmatch(r"[\w.-]+(?: [\w.-]+)*",v,re.UNICODE))
 def has_col(table,col):
