@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, json, time, secrets, hashlib, sqlite3, threading, mimetypes, urllib.parse, http.cookies
+import os, json, time, secrets, hashlib, sqlite3, threading, mimetypes, urllib.parse, http.cookies, re
 from pathlib import Path
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
