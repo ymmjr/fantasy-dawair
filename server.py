@@ -43,6 +43,11 @@ def i(v,d=0):
     except:return d
 def h(secret,salt):
     return hashlib.scrypt(str(secret).encode(),salt=str(salt).encode(),n=16384,r=8,p=1,dklen=32).hex()
+def norm_username(v): return str(v or "").strip().lower()
+def valid_username(v): return bool(re.fullmatch(r"[\w.-]{3,32}",v,re.UNICODE))
+def has_col(table,col):
+    if PG:return bool(row("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=? AND column_name=?",(table,col)))
+    return any(x["name"]==col for x in rows(f"PRAGMA table_info({table})"))
 
 def init():
     ID="BIGSERIAL PRIMARY KEY" if PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
