@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
         else: conn.executescript(schema)
         # v2: participant usernames + one-to-one participant/player linking.
         if not has_col("participants","username"): execq("ALTER TABLE participants ADD COLUMN username TEXT")
+        if not has_col("participants","code_ciphertext"): execq("ALTER TABLE participants ADD COLUMN code_ciphertext TEXT")
         if not has_col("players","participant_id"): execq("ALTER TABLE players ADD COLUMN participant_id BIGINT")
         for u in rows("SELECT id FROM participants WHERE username IS NULL OR TRIM(username)='' ORDER BY id"):
             execq("UPDATE participants SET username=? WHERE id=?",(f"user{u['id']}",u["id"]))
@@ -94,6 +95,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
         for k,v in defaults.items(): execq("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING",(k,v))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(1,?) ON CONFLICT(version) DO NOTHING",(now(),))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(2,?) ON CONFLICT(version) DO NOTHING",(now(),))
+        execq("INSERT INTO schema_migrations(version,applied_at) VALUES(3,?) ON CONFLICT(version) DO NOTHING",(now(),))
         if val("SELECT COUNT(*) FROM admins")==0:
             user=os.getenv("ADMIN_USERNAME","admin")
             pw=os.getenv("ADMIN_PASSWORD","").strip() or secrets.token_urlsafe(16)
