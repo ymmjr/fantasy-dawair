@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
         }
         for k,v in defaults.items(): execq("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING",(k,v))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(1,?) ON CONFLICT(version) DO NOTHING",(now(),))
+        execq("INSERT INTO schema_migrations(version,applied_at) VALUES(2,?) ON CONFLICT(version) DO NOTHING",(now(),))
         if val("SELECT COUNT(*) FROM admins")==0:
             user=os.getenv("ADMIN_USERNAME","admin")
             pw=os.getenv("ADMIN_PASSWORD","").strip() or secrets.token_urlsafe(16)
