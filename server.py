@@ -268,6 +268,10 @@ class H(BaseHTTPRequestHandler):
         t=self.cookies().get("sid"); x=SESS.get(t)
         if not x:return None
         if time.time()-x["t"]>SESSION_TTL:SESS.pop(t,None);return None
+        if x.get("participant_id"):
+            u=row("SELECT name,username,active,is_admin FROM participants WHERE id=?",(x["participant_id"],))
+            if not u or not u.get("active"):SESS.pop(t,None);return None
+            x["name"]=u["name"];x["username"]=u.get("username");x["is_admin"]=bool(u.get("is_admin"))
         x["t"]=time.time();return x
     def new_session(self,x):
         t=secrets.token_hex(24); SESS[t]={**x,"t":time.time()}; return t
