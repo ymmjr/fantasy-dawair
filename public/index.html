@@ -224,7 +224,7 @@ img{max-width:100%}
 .manage-accounts{display:grid;gap:10px;margin-top:12px}
 .manage-account{border:1px solid #1d6584;border-radius:15px;background:linear-gradient(180deg,#0a3048,#061d30);overflow:hidden}
 .manage-account[open]{border-color:#2d91b5}
-.manage-account-summary{list-style:none;cursor:pointer;display:grid;grid-template-columns:minmax(150px,1.5fr) minmax(120px,1.2fr) minmax(90px,.8fr) minmax(110px,1fr) auto;gap:10px;align-items:center;padding:12px 14px}
+.manage-account-summary{list-style:none;cursor:pointer;display:grid;grid-template-columns:minmax(150px,1.5fr) minmax(120px,1.2fr) minmax(90px,.8fr) minmax(110px,1fr) auto auto auto;gap:10px;align-items:center;padding:12px 14px}
 .manage-account-summary::-webkit-details-marker{display:none}
 .manage-account-summary:after{content:"⌄";font-size:19px;color:var(--cyan2);transition:.15s}
 .manage-account[open] .manage-account-summary:after{transform:rotate(180deg)}
@@ -234,6 +234,8 @@ img{max-width:100%}
 .manage-account-role.admin{background:#59430d;border-color:#b89221;color:#ffe990}
 .manage-account-state.off{background:#4b2630;border-color:#a84d62;color:#ffd3dc}
 .manage-account-pass{direction:ltr;text-align:right;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:#ffe9a4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.manage-account-wa-inline{border:1px solid #25945e;background:#1fbf70;color:white;border-radius:10px;min-height:34px;padding:6px 10px;font-size:10px;font-weight:900;cursor:pointer;white-space:nowrap}
+.manage-account-wa-inline:hover{background:#27ca79;transform:translateY(-1px)}
 .manage-account-body{border-top:1px solid #174c65;padding:14px}
 .manage-account-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .manage-account-grid label{display:grid;gap:6px;font-size:12px;color:#c8e8f2}
@@ -244,10 +246,15 @@ img{max-width:100%}
 .manage-accounts-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .manage-accounts-head .search-box{margin:0;max-width:360px}
 @media(max-width:700px){
-  .manage-account-summary{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) auto;gap:7px;padding:11px}
+  .manage-account-summary{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) auto auto;gap:7px;padding:11px}
+  .manage-account-name{grid-column:1;grid-row:1}
+  .manage-account-user{grid-column:2;grid-row:1}
+  .manage-account-role{grid-column:1;grid-row:2}
+  .manage-account-state{grid-column:2;grid-row:2}
   .manage-account-role,.manage-account-state{font-size:8px;padding:4px 6px}
-  .manage-account-pass{grid-column:1/3;font-size:10px}
-  .manage-account-summary:after{grid-column:3;grid-row:1/3}
+  .manage-account-pass{grid-column:1/3;grid-row:3;font-size:10px}
+  .manage-account-wa-inline{grid-column:3;grid-row:1/4;align-self:center;min-height:34px;padding:6px 8px;font-size:9px}
+  .manage-account-summary:after{grid-column:4;grid-row:1/4;align-self:center}
   .manage-account-grid{grid-template-columns:1fr}
   .manage-account-linked{grid-column:auto}
   .manage-account-actions{display:grid;grid-template-columns:1fr 1fr}
@@ -391,10 +398,10 @@ async function adminManageHub(){
 }
 async function adminAccountsHub(){
   let accounts=await api('/api/admin/participants');
-  $('#content').innerHTML=hero('إدارة الحسابات','جميع الحسابات وصلاحياتها وبيانات الدخول والإجراءات الإدارية في صفحة مستقلة.')+`<section class="card"><div class="manage-accounts-head"><div><h2 style="margin:0 0 5px">الحسابات</h2><div class="muted">اضغط على أي حساب لفتح جميع خياراته الإدارية.</div></div><input id="manageAccountsSearch" class="input search-box" placeholder="ابحث بالاسم أو اليوزر أو الصلاحية"></div><div class="manage-accounts">${accounts.map(x=>`<details class="manage-account" data-account-id="${x.id}" data-search="${esc(x.name+' '+(x.username||'')+' '+(x.is_admin?'مسؤول مساعد':'مشترك'))}"><summary class="manage-account-summary"><div class="manage-account-name">${esc(x.name)}</div><div class="manage-account-user">@${esc(x.username||'')}</div><span class="manage-account-role ${x.is_admin?'admin':''}">${x.is_admin?'مسؤول مساعد':'مشترك'}</span><div class="manage-account-pass">${esc(x.code_full||'غير متاح')}</div><span class="manage-account-state ${x.active?'':'off'}">${x.active?'نشط':'موقوف'}</span></summary><div class="manage-account-body"><div class="manage-account-grid"><label>الاسم<input class="input ma-name" value="${esc(x.name)}"></label><label>اسم المستخدم<input class="input ma-user" dir="ltr" value="${esc(x.username||'')}"></label><label>الباس الحالي<input class="input manage-account-current-pass" dir="ltr" readonly value="${esc(x.code_full||'غير متاح')}"></label><label>باس جديد<input class="input ma-code" dir="ltr" type="text" autocomplete="new-password" placeholder="اتركه فارغًا بدون تغيير"></label><label>الصلاحية<select class="ma-role"><option value="0" ${!x.is_admin?'selected':''}>مشترك</option><option value="1" ${x.is_admin?'selected':''}>مسؤول مساعد</option></select></label><label>الحالة<select class="ma-active"><option value="1" ${x.active?'selected':''}>نشط</option><option value="0" ${!x.active?'selected':''}>موقوف</option></select></label><div class="manage-account-linked">اللاعب المرتبط: <b>${x.player_name?esc(x.player_name):'غير مربوط بلاعب'}</b></div></div><div class="manage-account-actions"><button type="button" class="btn ma-save">حفظ التغييرات</button><button type="button" class="btn sec ma-wa">إرسال الرسالة الجاهزة</button><a class="btn sec" data-route href="/admin/people/${x.id}">فتح الملف الكامل</a><button type="button" class="tiny danger-btn ma-delete" ${S.me.participant_id===x.id?'disabled title="لا يمكنك حذف الحساب المستخدم حاليًا"':''}>حذف الحساب</button></div></div></details>`).join('')||'<div class="empty-state">لا توجد حسابات.</div>'}</div></section>`;
+  $('#content').innerHTML=hero('إدارة الحسابات','جميع الحسابات وصلاحياتها وبيانات الدخول والإجراءات الإدارية في صفحة مستقلة.')+`<section class="card"><div class="manage-accounts-head"><div><h2 style="margin:0 0 5px">الحسابات</h2><div class="muted">اضغط على أي حساب لفتح جميع خياراته الإدارية.</div></div><input id="manageAccountsSearch" class="input search-box" placeholder="ابحث بالاسم أو اليوزر أو الصلاحية"></div><div class="manage-accounts">${accounts.map(x=>`<details class="manage-account" data-account-id="${x.id}" data-search="${esc(x.name+' '+(x.username||'')+' '+(x.is_admin?'مسؤول مساعد':'مشترك'))}"><summary class="manage-account-summary"><div class="manage-account-name">${esc(x.name)}</div><div class="manage-account-user">@${esc(x.username||'')}</div><span class="manage-account-role ${x.is_admin?'admin':''}">${x.is_admin?'مسؤول مساعد':'مشترك'}</span><div class="manage-account-pass">${esc(x.code_full||'غير متاح')}</div><span class="manage-account-state ${x.active?'':'off'}">${x.active?'نشط':'موقوف'}</span><button type="button" class="manage-account-wa-inline" data-ma-wa-inline="${x.id}">واتساب</button></summary><div class="manage-account-body"><div class="manage-account-grid"><label>الاسم<input class="input ma-name" value="${esc(x.name)}"></label><label>اسم المستخدم<input class="input ma-user" dir="ltr" value="${esc(x.username||'')}"></label><label>الباس الحالي<input class="input manage-account-current-pass" dir="ltr" readonly value="${esc(x.code_full||'غير متاح')}"></label><label>باس جديد<input class="input ma-code" dir="ltr" type="text" autocomplete="new-password" placeholder="اتركه فارغًا بدون تغيير"></label><label>الصلاحية<select class="ma-role"><option value="0" ${!x.is_admin?'selected':''}>مشترك</option><option value="1" ${x.is_admin?'selected':''}>مسؤول مساعد</option></select></label><label>الحالة<select class="ma-active"><option value="1" ${x.active?'selected':''}>نشط</option><option value="0" ${!x.active?'selected':''}>موقوف</option></select></label><div class="manage-account-linked">اللاعب المرتبط: <b>${x.player_name?esc(x.player_name):'غير مربوط بلاعب'}</b></div></div><div class="manage-account-actions"><button type="button" class="btn ma-save">حفظ التغييرات</button><a class="btn sec" data-route href="/admin/people/${x.id}">فتح الملف الكامل</a><button type="button" class="tiny danger-btn ma-delete" ${S.me.participant_id===x.id?'disabled title="لا يمكنك حذف الحساب المستخدم حاليًا"':''}>حذف الحساب</button></div></div></details>`).join('')||'<div class="empty-state">لا توجد حسابات.</div>'}</div></section>`;
   bindSearch('#manageAccountsSearch','.manage-account');
   $$('.ma-save').forEach(b=>b.onclick=async()=>{let box=b.closest('.manage-account'),id=+box.dataset.accountId,body={name:$('.ma-name',box).value,username:$('.ma-user',box).value,is_admin:$('.ma-role',box).value==='1',active:$('.ma-active',box).value==='1'},code=$('.ma-code',box).value.trim();if(code)body.code=code;try{await api('/api/admin/participants/'+id,{method:'PUT',body:JSON.stringify(body)});toast('تم حفظ الحساب');adminAccountsHub()}catch(x){toast(x.message,true)}});
-  $$('.ma-wa').forEach(b=>b.onclick=()=>{let box=b.closest('.manage-account'),x=accounts.find(v=>v.id===+box.dataset.accountId);if(x)openParticipantWhatsApp(x)});
+  $$('[data-ma-wa-inline]').forEach(b=>b.onclick=e=>{e.preventDefault();e.stopPropagation();let x=accounts.find(v=>v.id===+b.dataset.maWaInline);if(x)openParticipantWhatsApp(x)});
   $$('.ma-delete').forEach(b=>b.onclick=async()=>{let box=b.closest('.manage-account'),x=accounts.find(v=>v.id===+box.dataset.accountId);if(!x)return;if(!confirm('حذف حساب '+x.name+'؟\n\nسيتم حذف الحساب وجميع تشكيلاته، بينما سيبقى اللاعب نفسه موجودًا وغير مربوط بحساب.'))return;try{await api('/api/admin/participants/'+x.id,{method:'DELETE'});toast('تم حذف الحساب');adminAccountsHub()}catch(e){toast(e.message,true)}});
 }
 function legacyManage(){history.replaceState({},'', '/admin/manage/rounds');S.page='admin-manage';return adminManageHub()}
