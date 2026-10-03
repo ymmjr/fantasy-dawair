@@ -155,7 +155,7 @@ def init():
     schema=f"""
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS admins(id {ID},username TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,salt TEXT NOT NULL,created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS participants(id {ID},name TEXT NOT NULL,code_hash TEXT UNIQUE NOT NULL,code_hint TEXT,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS participants(id {ID},name TEXT NOT NULL,code_hash TEXT NOT NULL,code_hint TEXT,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS players(id {ID},name TEXT NOT NULL,group_no INTEGER NOT NULL CHECK(group_no BETWEEN 1 AND 4),active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rounds(id {ID},number INTEGER UNIQUE NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'draft',lock_at TEXT,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS lineups(id {ID},participant_id BIGINT NOT NULL,round_id BIGINT NOT NULL,captain_player_id BIGINT NOT NULL,vice_player_id BIGINT NOT NULL,chip TEXT,submitted_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(participant_id,round_id));
@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
         if not has_col("players","participant_id"): execq("ALTER TABLE players ADD COLUMN participant_id BIGINT")
         for u in rows("SELECT id FROM participants WHERE username IS NULL OR TRIM(username)='' ORDER BY id"):
             execq("UPDATE participants SET username=? WHERE id=?",(f"user{u['id']}",u["id"]))
+        if PG: execq("ALTER TABLE participants DROP CONSTRAINT IF EXISTS participants_code_hash_key")
         execq("CREATE UNIQUE INDEX IF NOT EXISTS idx_participants_username ON participants(username)")
         execq("CREATE UNIQUE INDEX IF NOT EXISTS idx_players_participant_id ON players(participant_id) WHERE participant_id IS NOT NULL")
         defaults={
