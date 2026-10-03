@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(2,?) ON CONFLICT(version) DO NOTHING",(now(),))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(3,?) ON CONFLICT(version) DO NOTHING",(now(),))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(4,?) ON CONFLICT(version) DO NOTHING",(now(),))
+        ensure_player_accounts_v5()
         if val("SELECT COUNT(*) FROM admins")==0:
             user=os.getenv("ADMIN_USERNAME","admin")
             pw=os.getenv("ADMIN_PASSWORD","").strip() or secrets.token_urlsafe(16)
