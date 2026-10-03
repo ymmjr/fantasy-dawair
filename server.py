@@ -155,6 +155,40 @@ def ensure_player_accounts_v6():
     if not PG:conn.commit()
     print("PLAYER_ACCOUNTS_V6",json.dumps({"created":made,"updated":updated,"linked_existing":linked,"skipped":skipped,"details":details},ensure_ascii=False))
 
+
+def snapshot_round(rid,force=False):
+    if force:execq("DELETE FROM round_players WHERE round_id=?",(rid,))
+    if val("SELECT COUNT(*) FROM round_players WHERE round_id=?",(rid,)):return
+    for p in rows("SELECT id,name,group_no FROM players WHERE active=1 ORDER BY group_no,name"):
+        execq("INSERT INTO round_players(round_id,player_id,name,group_no) VALUES(?,?,?,?) ON CONFLICT(round_id,player_id) DO NOTHING",(rid,p["id"],p["name"],p["group_no"]))
+    if not PG:conn.commit()
+
+def ensure_next_round(after_number):
+    nxt=row("SELECT * FROM rounds WHERE number>? ORDER BY number ASC LIMIT 1",(after_number,))
+    if nxt:return nxt
+    num=after_number+1
+    rid=insert_id("INSERT INTO rounds(number,name,status,created_at) VALUES(?,?,?,?)",(num,f"الجولة {num}","draft",now()))
+    return row("SELECT * FROM rounds WHERE id=?",(rid,))
+
+def competition_round():
+    return row("SELECT * FROM rounds WHERE status='open' ORDER BY number DESC LIMIT 1") or row("SELECT * FROM rounds WHERE status IN ('locked','scored') ORDER BY number DESC LIMIT 1") or row("SELECT * FROM rounds ORDER BY number DESC LIMIT 1")
+
+def lineup_target_round():
+    op=row("SELECT * FROM rounds WHERE status='open' ORDER BY number DESC LIMIT 1")
+    if op:return op
+    cur=row("SELECT * FROM rounds WHERE status IN ('locked','scored') ORDER BY number DESC LIMIT 1")
+    if cur:
+        nxt=row("SELECT * FROM rounds WHERE number>? AND status='draft' ORDER BY number ASC LIMIT 1",(cur["number"],))
+        return nxt or ensure_next_round(cur["number"])
+    return row("SELECT * FROM rounds WHERE status='draft' ORDER BY number ASC LIMIT 1") or row("SELECT * FROM rounds ORDER BY number DESC LIMIT 1")
+
+def player_pool_for_round(r):
+    if not r:return []
+    if r["status"]=="draft":
+        return rows("SELECT p.id,p.name,p.group_no,u.profile_image,COALESCE((SELECT SUM(e.raw_points) FROM events e WHERE e.player_id=p.id),0) total_points FROM players p LEFT JOIN participants u ON u.id=p.participant_id WHERE p.active=1 ORDER BY p.group_no,p.name")
+    snapshot_round(r["id"])
+    return rows("SELECT rp.player_id id,rp.name,rp.group_no,u.profile_image,COALESCE((SELECT SUM(e.raw_points) FROM events e WHERE e.player_id=rp.player_id),0) total_points FROM round_players rp LEFT JOIN players p ON p.id=rp.player_id LEFT JOIN participants u ON u.id=p.participant_id WHERE rp.round_id=? ORDER BY rp.group_no,rp.name",(r["id"],))
+
 def init():
     ID="BIGSERIAL PRIMARY KEY" if PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
     schema=f"""
@@ -163,6 +197,7 @@ CREATE TABLE IF NOT EXISTS admins(id {ID},username TEXT UNIQUE NOT NULL,password
 CREATE TABLE IF NOT EXISTS participants(id {ID},name TEXT NOT NULL,code_hash TEXT NOT NULL,code_hint TEXT,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS players(id {ID},name TEXT NOT NULL,group_no INTEGER NOT NULL CHECK(group_no BETWEEN 1 AND 4),active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rounds(id {ID},number INTEGER UNIQUE NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'draft',lock_at TEXT,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS round_players(round_id BIGINT NOT NULL,player_id BIGINT NOT NULL,name TEXT NOT NULL,group_no INTEGER NOT NULL CHECK(group_no BETWEEN 1 AND 4),PRIMARY KEY(round_id,player_id));
 CREATE TABLE IF NOT EXISTS lineups(id {ID},participant_id BIGINT NOT NULL,round_id BIGINT NOT NULL,captain_player_id BIGINT NOT NULL,vice_player_id BIGINT NOT NULL,chip TEXT,submitted_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(participant_id,round_id));
 CREATE TABLE IF NOT EXISTS lineup_players(id {ID},lineup_id BIGINT NOT NULL,player_id BIGINT NOT NULL,role TEXT NOT NULL,bench_order INTEGER NOT NULL DEFAULT 0,UNIQUE(lineup_id,player_id));
 CREATE TABLE IF NOT EXISTS events(id {ID},round_id BIGINT NOT NULL,player_id BIGINT NOT NULL,goals INTEGER NOT NULL DEFAULT 0,wins INTEGER NOT NULL DEFAULT 0,hattricks INTEGER NOT NULL DEFAULT 0,attendance INTEGER NOT NULL DEFAULT 0,best_player INTEGER NOT NULL DEFAULT 0,yellow INTEGER NOT NULL DEFAULT 0,red INTEGER NOT NULL DEFAULT 0,no_shoes INTEGER NOT NULL DEFAULT 0,own_goals INTEGER NOT NULL DEFAULT 0,raw_points INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,UNIQUE(round_id,player_id));
@@ -197,6 +232,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(3,?) ON CONFLICT(version) DO NOTHING",(now(),))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(4,?) ON CONFLICT(version) DO NOTHING",(now(),))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(7,?) ON CONFLICT(version) DO NOTHING",(now(),))
+        execq("INSERT INTO schema_migrations(version,applied_at) VALUES(8,?) ON CONFLICT(version) DO NOTHING",(now(),))
         ensure_player_accounts_v6()
         if val("SELECT COUNT(*) FROM admins")==0:
             user=os.getenv("ADMIN_USERNAME","admin")
@@ -206,6 +242,8 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
             if not os.getenv("ADMIN_PASSWORD"): print("INITIAL ADMIN PASSWORD:",pw)
         if val("SELECT COUNT(*) FROM rounds")==0:
             insert_id("INSERT INTO rounds(number,name,status,created_at) VALUES(1,'الجولة 1','open',?)",(now(),))
+        for rr in rows("SELECT id FROM rounds WHERE status IN ('open','locked','scored') ORDER BY number"):
+            snapshot_round(rr["id"])
         if not PG: conn.commit()
 init()
 
@@ -223,7 +261,7 @@ def raw(e,s=None):
 
 def lineup(pid,rid):
     l=row("SELECT * FROM lineups WHERE participant_id=? AND round_id=?",(pid,rid))
-    if l:l["players"]=rows("SELECT lp.*,p.name,p.group_no,u.profile_image FROM lineup_players lp JOIN players p ON p.id=lp.player_id LEFT JOIN participants u ON u.id=p.participant_id WHERE lp.lineup_id=? ORDER BY CASE lp.role WHEN 'starter' THEN 0 ELSE 1 END,lp.bench_order",(l["id"],))
+    if l:l["players"]=rows("SELECT lp.*,COALESCE(rp.name,p.name) name,COALESCE(rp.group_no,p.group_no) group_no,u.profile_image FROM lineup_players lp JOIN players p ON p.id=lp.player_id LEFT JOIN round_players rp ON rp.round_id=? AND rp.player_id=p.id LEFT JOIN participants u ON u.id=p.participant_id WHERE lp.lineup_id=? ORDER BY CASE lp.role WHEN 'starter' THEN 0 ELSE 1 END,lp.bench_order",(rid,l["id"]))
     return l
 
 def used_chips(pid,exclude=0):
@@ -290,6 +328,7 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):self.route("GET")
     def do_POST(self):self.route("POST")
     def do_PUT(self):self.route("PUT")
+    def do_DELETE(self):self.route("DELETE")
     def route(self,m):
         u=urllib.parse.urlsplit(self.path);p=u.path;q=urllib.parse.parse_qs(u.query)
         try:
@@ -327,10 +366,10 @@ class H(BaseHTTPRequestHandler):
         a=self.auth()
         if not a:return
         if m=="GET" and p=="/api/bootstrap":
-            rr=rows("SELECT * FROM rounds ORDER BY number DESC");cur=next((x for x in rr if x["status"]=="open"),rr[0] if rr else None)
-            out={"settings":settings(),"players":rows("SELECT p.id,p.name,p.group_no,u.profile_image,COALESCE((SELECT SUM(e.raw_points) FROM events e WHERE e.player_id=p.id),0) total_points FROM players p LEFT JOIN participants u ON u.id=p.participant_id WHERE p.active=1 ORDER BY p.group_no,p.name"),"rounds":rr,"current_round":cur}
+            cur=competition_round();target=lineup_target_round();rr=rows("SELECT * FROM rounds ORDER BY number DESC")
+            out={"settings":settings(),"players":player_pool_for_round(target),"rounds":rr,"current_round":cur,"lineup_round":target,"editing_next_round":bool(target and cur and target["id"]!=cur["id"])}
             if a.get("participant_id"):
-                pid=a["participant_id"];out["lineup"]=lineup(pid,cur["id"]) if cur else None;out["used_chips"]=used_chips(pid);out["leaderboard"]=leaderboard(cur["id"] if cur else 0)
+                pid=a["participant_id"];out["lineup"]=lineup(pid,target["id"]) if target else None;out["used_chips"]=used_chips(pid,target["id"] if target else 0);out["leaderboard"]=leaderboard(cur["id"] if cur and cur["status"]!="draft" else 0)
             return self.sendj(200,out)
         if m=="GET" and p=="/api/leaderboard":return self.sendj(200,leaderboard(i(q.get("round_id",["0"])[0])))
         parts=p.strip("/").split("/")
@@ -338,10 +377,15 @@ class H(BaseHTTPRequestHandler):
             rid=i(parts[2]); r=row("SELECT * FROM rounds WHERE id=?",(rid,))
             if m=="GET":return self.sendj(200,{"lineup":lineup(a["participant_id"],rid),"score":score(a["participant_id"],rid)})
             if m=="PUT":
-                if not r or r["status"]!="open":return self.sendj(400,{"error":"الجولة مقفلة"})
+                target=lineup_target_round()
+                if not r or not target or rid!=target["id"] or r["status"] not in ("open","draft"):return self.sendj(400,{"error":"هذه الجولة غير متاحة لتعديل التشكيلة"})
                 b=self.body();items=b.get("players",[]);ids=[i(x.get("player_id")) for x in items]
                 if len(ids)!=8 or len(set(ids))!=8:return self.sendj(400,{"error":"يجب اختيار 8 لاعبين مختلفين"})
-                ph=",".join(["?"]*8);ps=rows(f"SELECT id,group_no FROM players WHERE active=1 AND id IN ({ph})",tuple(ids))
+                ph=",".join(["?"]*8)
+                if r["status"]=="draft":
+                    ps=rows(f"SELECT id,group_no FROM players WHERE active=1 AND id IN ({ph})",tuple(ids))
+                else:
+                    snapshot_round(rid);ps=rows(f"SELECT player_id id,group_no FROM round_players WHERE round_id=? AND player_id IN ({ph})",(rid,*ids))
                 counts={g:0 for g in range(1,5)}
                 for x in ps:counts[x["group_no"]]+=1
                 if len(ps)!=8 or any(counts[g]!=2 for g in counts):return self.sendj(400,{"error":"يجب اختيار لاعبين من كل مجموعة"})
@@ -423,8 +467,21 @@ class H(BaseHTTPRequestHandler):
             execq("UPDATE players SET name=? WHERE participant_id=?",(name,uid))
             if not PG:conn.commit()
             return self.sendj(200,{"ok":True})
+        if len(parts)==4 and parts[:3]==["api","admin","participants"] and m=="DELETE":
+            uid=i(parts[3]);victim=row("SELECT id,name FROM participants WHERE id=?",(uid,))
+            if not victim:return self.sendj(404,{"error":"الحساب غير موجود"})
+            if a.get("participant_id")==uid:return self.sendj(400,{"error":"لا يمكنك حذف الحساب الذي تستخدمه حالياً"})
+            lids=[x["id"] for x in rows("SELECT id FROM lineups WHERE participant_id=?",(uid,))]
+            for lid in lids:execq("DELETE FROM lineup_players WHERE lineup_id=?",(lid,))
+            execq("DELETE FROM lineups WHERE participant_id=?",(uid,))
+            execq("UPDATE players SET participant_id=NULL WHERE participant_id=?",(uid,))
+            execq("DELETE FROM participants WHERE id=?",(uid,))
+            for token,sx in list(SESS.items()):
+                if sx.get("participant_id")==uid:SESS.pop(token,None)
+            if not PG:conn.commit()
+            return self.sendj(200,{"ok":True,"deleted":victim["name"]})
         if m=="GET" and p=="/api/admin/players":
-            return self.sendj(200,rows("SELECT p.id,p.name,p.group_no,p.active,p.participant_id,u.username,u.name participant_name,u.profile_image FROM players p LEFT JOIN participants u ON u.id=p.participant_id ORDER BY p.group_no,p.name"))
+            return self.sendj(200,rows("SELECT p.id,p.name,p.group_no,p.active,p.participant_id,u.username,u.name participant_name,u.profile_image,(SELECT rp.group_no FROM round_players rp JOIN rounds rr ON rr.id=rp.round_id WHERE rp.player_id=p.id AND rr.status=\'open\' ORDER BY rr.number DESC LIMIT 1) current_group_no FROM players p LEFT JOIN participants u ON u.id=p.participant_id ORDER BY p.group_no,p.name"))
         if m=="POST" and p=="/api/admin/players":
             b=self.body();g=i(b.get("group_no"));name=str(b.get("name","")).strip()
             if not name or g not in (1,2,3,4):return self.sendj(400,{"error":"بيانات اللاعب غير صحيحة"})
@@ -474,12 +531,24 @@ class H(BaseHTTPRequestHandler):
         if m=="POST" and p=="/api/admin/rounds":
             b=self.body();num=i(b.get("number"));return self.sendj(200,{"ok":True,"id":insert_id("INSERT INTO rounds(number,name,status,created_at) VALUES(?,?,?,?)",(num,b.get("name") or f"الجولة {num}",b.get("status") or "draft",now()))})
         if len(parts)==4 and parts[:3]==["api","admin","rounds"] and m=="PUT":
-            b=self.body();rid=i(parts[3])
-            if b.get("status")=="open":execq("UPDATE rounds SET status='locked' WHERE status='open' AND id<>?",(rid,))
-            execq("UPDATE rounds SET name=?,status=?,lock_at=? WHERE id=?",(b.get("name",""),b.get("status","draft"),b.get("lock_at"),rid));conn.commit() if not PG else None;return self.sendj(200,{"ok":True})
+            b=self.body();rid=i(parts[3]);cur_r=row("SELECT * FROM rounds WHERE id=?",(rid,));st=b.get("status","draft")
+            if not cur_r:return self.sendj(404,{"error":"الجولة غير موجودة"})
+            if st=="open":
+                execq("UPDATE rounds SET status='locked' WHERE status='open' AND id<>?",(rid,))
+                snapshot_round(rid,True)
+            execq("UPDATE rounds SET name=?,status=?,lock_at=? WHERE id=?",(b.get("name",cur_r["name"]),st,b.get("lock_at"),rid))
+            if st in ("locked","scored"):ensure_next_round(cur_r["number"])
+            conn.commit() if not PG else None
+            return self.sendj(200,{"ok":True})
         if len(parts)==4 and parts[:3]==["api","admin","scores"]:
             rid=i(parts[3])
-            if m=="GET":return self.sendj(200,rows("SELECT p.id player_id,p.name,p.group_no,COALESCE(e.goals,0) goals,COALESCE(e.wins,0) wins,COALESCE(e.hattricks,0) hattricks,COALESCE(e.attendance,0) attendance,COALESCE(e.best_player,0) best_player,COALESCE(e.yellow,0) yellow,COALESCE(e.red,0) red,COALESCE(e.no_shoes,0) no_shoes,COALESCE(e.own_goals,0) own_goals,COALESCE(e.raw_points,0) raw_points FROM players p LEFT JOIN events e ON e.player_id=p.id AND e.round_id=? WHERE p.active=1 ORDER BY p.group_no,p.name",(rid,)))
+            if m=="GET":
+                sr=row("SELECT * FROM rounds WHERE id=?",(rid,))
+                if sr and sr["status"]!="draft":
+                    snapshot_round(rid)
+                    return self.sendj(200,rows("SELECT rp.player_id,rp.name,rp.group_no,COALESCE(e.goals,0) goals,COALESCE(e.wins,0) wins,COALESCE(e.hattricks,0) hattricks,COALESCE(e.attendance,0) attendance,COALESCE(e.best_player,0) best_player,COALESCE(e.yellow,0) yellow,COALESCE(e.red,0) red,COALESCE(e.no_shoes,0) no_shoes,COALESCE(e.own_goals,0) own_goals,COALESCE(e.raw_points,0) raw_points FROM round_players rp LEFT JOIN events e ON e.player_id=rp.player_id AND e.round_id=? WHERE rp.round_id=? ORDER BY rp.group_no,rp.name",(rid,rid)))
+                return self.sendj(200,rows("SELECT p.id player_id,p.name,p.group_no,COALESCE(e.goals,0) goals,COALESCE(e.wins,0) wins,COALESCE(e.hattricks,0) hattricks,COALESCE(e.attendance,0) attendance,COALESCE(e.best_player,0) best_player,COALESCE(e.yellow,0) yellow,COALESCE(e.red,0) red,COALESCE(e.no_shoes,0) no_shoes,COALESCE(e.own_goals,0) own_goals,COALESCE(e.raw_points,0) raw_points FROM players p LEFT JOIN events e ON e.player_id=p.id AND e.round_id=? WHERE p.active=1 ORDER BY p.group_no,p.name",(rid,)))
+
             if m=="PUT":
                 s=settings()
                 for x in self.body().get("scores",[]):
@@ -504,7 +573,7 @@ class H(BaseHTTPRequestHandler):
             if not PG:conn.commit()
             return self.sendj(200,{"ok":True})
         if m=="GET" and p=="/api/admin/backup":
-            data={"exported_at":now(),"settings":rows("SELECT * FROM settings"),"participants":rows("SELECT id,name,username,code_hint,profile_image,active,is_admin,created_at FROM participants"),"players":rows("SELECT * FROM players"),"rounds":rows("SELECT * FROM rounds"),"lineups":rows("SELECT * FROM lineups"),"lineup_players":rows("SELECT * FROM lineup_players"),"events":rows("SELECT * FROM events")}
+            data={"exported_at":now(),"settings":rows("SELECT * FROM settings"),"participants":rows("SELECT id,name,username,code_hint,profile_image,active,is_admin,created_at FROM participants"),"players":rows("SELECT * FROM players"),"rounds":rows("SELECT * FROM rounds"),"round_players":rows("SELECT * FROM round_players"),"lineups":rows("SELECT * FROM lineups"),"lineup_players":rows("SELECT * FROM lineup_players"),"events":rows("SELECT * FROM events")}
             return self.sendj(200,data)
         return self.sendj(404,{"error":"المسار غير موجود"})
 
