@@ -41,6 +41,18 @@ def insert_id(q,a=()):
         c=execq(q+" RETURNING id",a); return c.fetchone()["id"]
     c=execq(q,a); conn.commit(); return c.lastrowid
 def now(): return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
+def parse_utc(v):
+    if not v:return None
+    try:
+        s=str(v).strip()
+        if s.endswith("Z"):s=s[:-1]+"+00:00"
+        dt=datetime.fromisoformat(s)
+        if dt.tzinfo is None:dt=dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except:return None
+def deadline_passed(r):
+    dt=parse_utc((r or {}).get("lock_at"))
+    return bool(dt and datetime.now(timezone.utc)>=dt)
 def i(v,d=0):
     try:return int(v)
     except:return d
@@ -175,7 +187,10 @@ def competition_round():
 
 def lineup_target_round():
     op=row("SELECT * FROM rounds WHERE status='open' ORDER BY number DESC LIMIT 1")
-    if op:return op
+    if op and not deadline_passed(op):return op
+    if op:
+        nxt=row("SELECT * FROM rounds WHERE number>? AND status='draft' ORDER BY number ASC LIMIT 1",(op["number"],))
+        return nxt or ensure_next_round(op["number"])
     cur=row("SELECT * FROM rounds WHERE status IN ('locked','scored') ORDER BY number DESC LIMIT 1")
     if cur:
         nxt=row("SELECT * FROM rounds WHERE number>? AND status='draft' ORDER BY number ASC LIMIT 1",(cur["number"],))
@@ -379,6 +394,7 @@ class H(BaseHTTPRequestHandler):
             if m=="PUT":
                 target=lineup_target_round()
                 if not r or not target or rid!=target["id"] or r["status"] not in ("open","draft"):return self.sendj(400,{"error":"هذه الجولة غير متاحة لتعديل التشكيلة"})
+                if r["status"]=="open" and deadline_passed(r):return self.sendj(400,{"error":"انتهى وقت تسليم التشكيلة لهذه الجولة"})
                 b=self.body();items=b.get("players",[]);ids=[i(x.get("player_id")) for x in items]
                 if len(ids)!=8 or len(set(ids))!=8:return self.sendj(400,{"error":"يجب اختيار 8 لاعبين مختلفين"})
                 ph=",".join(["?"]*8)
@@ -529,14 +545,18 @@ class H(BaseHTTPRequestHandler):
             return self.sendj(200,{"ok":True})
         if m=="GET" and p=="/api/rounds":return self.sendj(200,rows("SELECT * FROM rounds ORDER BY number DESC"))
         if m=="POST" and p=="/api/admin/rounds":
-            b=self.body();num=i(b.get("number"));return self.sendj(200,{"ok":True,"id":insert_id("INSERT INTO rounds(number,name,status,created_at) VALUES(?,?,?,?)",(num,b.get("name") or f"الجولة {num}",b.get("status") or "draft",now()))})
+            b=self.body();num=i(b.get("number"));lock_at=b.get("lock_at") or None
+            if lock_at and not parse_utc(lock_at):return self.sendj(400,{"error":"تاريخ ووقت انتهاء الجولة غير صالح"})
+            return self.sendj(200,{"ok":True,"id":insert_id("INSERT INTO rounds(number,name,status,lock_at,created_at) VALUES(?,?,?,?,?)",(num,b.get("name") or f"الجولة {num}",b.get("status") or "draft",lock_at,now()))})
         if len(parts)==4 and parts[:3]==["api","admin","rounds"] and m=="PUT":
             b=self.body();rid=i(parts[3]);cur_r=row("SELECT * FROM rounds WHERE id=?",(rid,));st=b.get("status","draft")
             if not cur_r:return self.sendj(404,{"error":"الجولة غير موجودة"})
+            lock_at=b.get("lock_at",cur_r.get("lock_at")) or None
+            if lock_at and not parse_utc(lock_at):return self.sendj(400,{"error":"تاريخ ووقت انتهاء الجولة غير صالح"})
             if st=="open":
                 execq("UPDATE rounds SET status='locked' WHERE status='open' AND id<>?",(rid,))
                 snapshot_round(rid,True)
-            execq("UPDATE rounds SET name=?,status=?,lock_at=? WHERE id=?",(b.get("name",cur_r["name"]),st,b.get("lock_at"),rid))
+            execq("UPDATE rounds SET name=?,status=?,lock_at=? WHERE id=?",(b.get("name",cur_r["name"]),st,lock_at,rid))
             if st in ("locked","scored"):ensure_next_round(cur_r["number"])
             conn.commit() if not PG else None
             return self.sendj(200,{"ok":True})
