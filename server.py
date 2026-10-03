@@ -69,6 +69,87 @@ def has_col(table,col):
     if PG:return bool(row("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=? AND column_name=?",(table,col)))
     return any(x["name"]==col for x in rows(f"PRAGMA table_info({table})"))
 
+
+def player_account_username(name):
+    parts=[x for x in re.split(r"\s+",str(name or "").strip()) if x]
+    if not parts:return ""
+    return norm_username(parts[0] if len(parts)==1 else f"{parts[0]} {parts[-1]}")
+
+def english_first_name(name):
+    parts=[x for x in re.split(r"\s+",str(name or "").strip()) if x]
+    first=parts[0] if parts else "Player"
+    if re.fullmatch(r"[A-Za-z][A-Za-z'.-]*",first):
+        return first[:1].upper()+first[1:].lower()
+    ar=re.sub(r"[\u064B-\u065F\u0670\u0640]","",first)
+    ar=ar.replace("أ","ا").replace("إ","ا").replace("آ","ا")
+    known={
+      "يوسف":"Yousef","محمد":"Mohammed","محمود":"Mahmoud","احمد":"Ahmed","حمد":"Hamad",
+      "خالد":"Khaled","فهد":"Fahad","سعود":"Saud","ناصر":"Nasser","بدر":"Bader",
+      "سلمان":"Salman","عمر":"Omar","علي":"Ali","حسن":"Hasan","حسين":"Hussain",
+      "مشعل":"Meshal","فيصل":"Faisal","راشد":"Rashid","صالح":"Saleh","ابراهيم":"Ibrahim",
+      "اسماعيل":"Ismail","اسحاق":"Ishaq","ايوب":"Ayoub","ادم":"Adam","يحيى":"Yahya",
+      "زكريا":"Zakariya","طارق":"Tariq","طلال":"Talal","تركي":"Turki","جاسم":"Jassim",
+      "جابر":"Jaber","حبيب":"Habib","حمود":"Hammoud","حمدان":"Hamdan","حمدي":"Hamdi",
+      "سعد":"Saad","سعيد":"Saeed","سيف":"Saif","سلطان":"Sultan","عبدالله":"Abdullah",
+      "عبدالرحمن":"Abdulrahman","عبدالعزيز":"Abdulaziz","عبدالمحسن":"Abdulmohsen",
+      "عبداللطيف":"Abdullatif","عبدالملك":"Abdulmalik","عبدالوهاب":"Abdulwahab",
+      "عبدالقادر":"Abdulqader","عبدالكريم":"Abdulkarim","عبدالهادي":"Abdulhadi",
+      "عبدالرحيم":"Abdulrahim","عبدالناصر":"Abdulnasser","عبدالاله":"Abdulilah",
+      "عبدالاله":"Abdulilah","عبدالمجيد":"Abdulmajeed","عبدالحميد":"Abdulhameed",
+      "عبدالصمد":"Abdulsamad","عبدالواحد":"Abdulwahid","عبدالمنعم":"Abdulmunim",
+      "وليد":"Waleed","ماجد":"Majed","مازن":"Mazen","معاذ":"Muath","مرزوق":"Marzouq",
+      "مبارك":"Mubarak","منصور":"Mansour","نايف":"Nayef","نواف":"Nawaf","هشام":"Hisham",
+      "هيثم":"Haitham","يزيد":"Yazeed","ياسر":"Yasser","يعقوب":"Yaqoub","امين":"Ameen",
+      "انس":"Anas","اسامة":"Osama","اكرم":"Akram","ايمن":"Ayman","بشار":"Bashar",
+      "بسام":"Bassam","ثامر":"Thamer","حازم":"Hazem","حاتم":"Hatem","ربيع":"Rabee",
+      "زياد":"Ziyad","سامر":"Samer","سامي":"Sami","شهاب":"Shehab","صقر":"Saqr",
+      "ضياء":"Diaa","عادل":"Adel","عارف":"Aref","عامر":"Amer","عباس":"Abbas",
+      "عثمان":"Othman","عدنان":"Adnan","عيسى":"Essa","غازي":"Ghazi","فارس":"Fares",
+      "فواز":"Fawaz","قاسم":"Qasim","كريم":"Kareem","لطفي":"Lotfi","لؤي":"Loay",
+      "مصعب":"Musab","مهدي":"Mahdi","مهند":"Muhannad","موسى":"Musa","نبيل":"Nabil"
+    }
+    if ar in known:return known[ar]
+    mp={"ا":"a","ب":"b","ت":"t","ث":"th","ج":"j","ح":"h","خ":"kh","د":"d","ذ":"dh","ر":"r","ز":"z","س":"s","ش":"sh","ص":"s","ض":"d","ط":"t","ظ":"z","ع":"a","غ":"gh","ف":"f","ق":"q","ك":"k","ل":"l","م":"m","ن":"n","ه":"h","و":"w","ي":"y","ى":"a","ة":"h","ء":"","ئ":"y","ؤ":"w"}
+    s="".join(mp.get(ch,ch) for ch in ar)
+    s=re.sub(r"[^A-Za-z0-9]","",s) or "Player"
+    return s[:1].upper()+s[1:].lower()
+
+def ensure_player_accounts_v5():
+    if val("SELECT COUNT(*) FROM schema_migrations WHERE version=5"):return
+    made=updated=linked=skipped=0
+    details=[]
+    for p in rows("SELECT id,name,participant_id FROM players WHERE active=1 ORDER BY id"):
+        username=player_account_username(p["name"])
+        code=english_first_name(p["name"])+"123"
+        if not valid_username(username):
+            skipped+=1;details.append({"player_id":p["id"],"name":p["name"],"status":"invalid_username"});continue
+        cipher=enc_code(code) if CODE_CIPHER else None
+        uid=p.get("participant_id")
+        if uid:
+            other=row("SELECT id FROM participants WHERE username=? AND id<>?",(username,uid))
+            if other:
+                skipped+=1;details.append({"player_id":p["id"],"name":p["name"],"status":"username_conflict"});continue
+            execq("UPDATE participants SET name=?,username=?,code_hash=?,code_hint=?,code_ciphertext=?,active=1 WHERE id=?",(p["name"],username,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),cipher,uid))
+            updated+=1
+        else:
+            existing=row("SELECT id FROM participants WHERE username=?",(username,))
+            if existing:
+                used=row("SELECT id FROM players WHERE participant_id=? AND id<>?",(existing["id"],p["id"]))
+                if used:
+                    skipped+=1;details.append({"player_id":p["id"],"name":p["name"],"status":"username_conflict"});continue
+                uid=existing["id"]
+                execq("UPDATE participants SET name=?,code_hash=?,code_hint=?,code_ciphertext=?,active=1 WHERE id=?",(p["name"],h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),cipher,uid))
+                execq("UPDATE players SET participant_id=? WHERE id=?",(uid,p["id"]))
+                linked+=1
+            else:
+                uid=insert_id("INSERT INTO participants(name,username,code_hash,code_hint,code_ciphertext,active,created_at) VALUES(?,?,?,?,?,1,?)",(p["name"],username,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),cipher,now()))
+                execq("UPDATE players SET participant_id=? WHERE id=?",(uid,p["id"]))
+                made+=1
+        details.append({"player_id":p["id"],"name":p["name"],"username":username,"status":"ok"})
+    execq("INSERT INTO schema_migrations(version,applied_at) VALUES(5,?) ON CONFLICT(version) DO NOTHING",(now(),))
+    if not PG:conn.commit()
+    print("PLAYER_ACCOUNTS_V5",json.dumps({"created":made,"updated":updated,"linked_existing":linked,"skipped":skipped,"details":details},ensure_ascii=False))
+
 def init():
     ID="BIGSERIAL PRIMARY KEY" if PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
     schema=f"""
