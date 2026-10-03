@@ -178,6 +178,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
         if not has_col("participants","username"): execq("ALTER TABLE participants ADD COLUMN username TEXT")
         if not has_col("participants","code_ciphertext"): execq("ALTER TABLE participants ADD COLUMN code_ciphertext TEXT")
         if not has_col("participants","profile_image"): execq("ALTER TABLE participants ADD COLUMN profile_image TEXT")
+        if not has_col("participants","is_admin"): execq("ALTER TABLE participants ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
         if not has_col("players","participant_id"): execq("ALTER TABLE players ADD COLUMN participant_id BIGINT")
         for u in rows("SELECT id FROM participants WHERE username IS NULL OR TRIM(username)='' ORDER BY id"):
             execq("UPDATE participants SET username=? WHERE id=?",(f"user{u['id']}",u["id"]))
@@ -195,6 +196,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(2,?) ON CONFLICT(version) DO NOTHING",(now(),))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(3,?) ON CONFLICT(version) DO NOTHING",(now(),))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(4,?) ON CONFLICT(version) DO NOTHING",(now(),))
+        execq("INSERT INTO schema_migrations(version,applied_at) VALUES(7,?) ON CONFLICT(version) DO NOTHING",(now(),))
         ensure_player_accounts_v6()
         if val("SELECT COUNT(*) FROM admins")==0:
             user=os.getenv("ADMIN_USERNAME","admin")
@@ -295,37 +297,42 @@ class H(BaseHTTPRequestHandler):
     def auth(self,role=None):
         s=self.sess()
         if not s:self.sendj(401,{"error":"يلزم تسجيل الدخول"});return None
-        if role and s["role"]!=role:self.sendj(403,{"error":"غير مصرح"});return None
+        if role=="admin" and not s.get("is_admin"):self.sendj(403,{"error":"غير مصرح"});return None
+        if role=="participant" and not s.get("participant_id"):self.sendj(403,{"error":"هذا الحساب غير مرتبط بمشارك"});return None
         return s
     def api(self,m,p,q):
-        if m=="POST" and p=="/api/login/admin":
-            b=self.body();a=row("SELECT * FROM admins WHERE username=?",(b.get("username",""),))
-            if not a or h(b.get("password",""),a["salt"])!=a["password_hash"]:return self.sendj(401,{"error":"بيانات الدخول غير صحيحة"})
-            t=self.new_session({"role":"admin","id":a["id"],"name":a["username"]});return self.sendj(200,{"ok":True},f"sid={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
-        if m=="POST" and p=="/api/login/participant":
-            b=self.body();un=norm_username(b.get("username",""));raw_code=str(b.get("code","")).strip();code=h(raw_code.upper(),"dawair-participant-v1")
-            u=row("SELECT id,name,username,code_ciphertext FROM participants WHERE username=? AND code_hash=? AND active=1",(un,code)) if un else row("SELECT id,name,username,code_ciphertext FROM participants WHERE code_hash=? AND active=1",(code,))
-            if not u:return self.sendj(401,{"error":"اسم المستخدم أو رمز الدخول غير صحيح"})
-            if not u.get("code_ciphertext") and CODE_CIPHER:
-                execq("UPDATE participants SET code_ciphertext=? WHERE id=?",(enc_code(raw_code),u["id"]))
-                if not PG:conn.commit()
-            t=self.new_session({"role":"participant","id":u["id"],"name":u["name"],"username":u.get("username")});return self.sendj(200,{"ok":True},f"sid={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
+        if m=="POST" and p in ("/api/login","/api/login/participant","/api/login/admin"):
+            b=self.body();un=norm_username(b.get("username",""));secret=str(b.get("password",b.get("code",""))).strip()
+            if un and secret:
+                code=h(secret.upper(),"dawair-participant-v1")
+                u=row("SELECT id,name,username,code_hash,code_ciphertext,is_admin FROM participants WHERE username=? AND active=1",(un,))
+                if u and code==u["code_hash"]:
+                    if not u.get("code_ciphertext") and CODE_CIPHER:
+                        execq("UPDATE participants SET code_ciphertext=? WHERE id=?",(enc_code(secret),u["id"]))
+                        if not PG:conn.commit()
+                    t=self.new_session({"role":"participant","id":u["id"],"participant_id":u["id"],"name":u["name"],"username":u.get("username"),"is_admin":bool(u.get("is_admin")),"legacy_admin":False})
+                    return self.sendj(200,{"ok":True},f"sid={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
+                ad=row("SELECT * FROM admins WHERE username=?",(str(b.get("username","")).strip(),))
+                if ad and h(secret,ad["salt"])==ad["password_hash"]:
+                    t=self.new_session({"role":"admin","id":ad["id"],"participant_id":None,"name":ad["username"],"username":ad["username"],"is_admin":True,"legacy_admin":True})
+                    return self.sendj(200,{"ok":True},f"sid={t}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800")
+            return self.sendj(401,{"error":"اسم المستخدم أو كلمة المرور غير صحيحة"})
         if m=="POST" and p=="/api/logout":SESS.pop(self.cookies().get("sid"),None);return self.sendj(200,{"ok":True},"sid=; Path=/; Max-Age=0")
         if m=="GET" and p=="/api/me":
-            s=self.sess();return self.sendj(200,{"authenticated":False} if not s else {"authenticated":True,"role":s["role"],"id":s["id"],"name":s["name"],"username":s.get("username")})
+            s=self.sess();return self.sendj(200,{"authenticated":False} if not s else {"authenticated":True,"role":s["role"],"id":s["id"],"participant_id":s.get("participant_id"),"has_participant":bool(s.get("participant_id")),"is_admin":bool(s.get("is_admin")),"legacy_admin":bool(s.get("legacy_admin")),"name":s["name"],"username":s.get("username")})
         a=self.auth()
         if not a:return
         if m=="GET" and p=="/api/bootstrap":
             rr=rows("SELECT * FROM rounds ORDER BY number DESC");cur=next((x for x in rr if x["status"]=="open"),rr[0] if rr else None)
             out={"settings":settings(),"players":rows("SELECT p.id,p.name,p.group_no,u.profile_image,COALESCE((SELECT SUM(e.raw_points) FROM events e WHERE e.player_id=p.id),0) total_points FROM players p LEFT JOIN participants u ON u.id=p.participant_id WHERE p.active=1 ORDER BY p.group_no,p.name"),"rounds":rr,"current_round":cur}
-            if a["role"]=="participant":
-                out["lineup"]=lineup(a["id"],cur["id"]) if cur else None;out["used_chips"]=used_chips(a["id"]);out["leaderboard"]=leaderboard(cur["id"] if cur else 0)
+            if a.get("participant_id"):
+                pid=a["participant_id"];out["lineup"]=lineup(pid,cur["id"]) if cur else None;out["used_chips"]=used_chips(pid);out["leaderboard"]=leaderboard(cur["id"] if cur else 0)
             return self.sendj(200,out)
         if m=="GET" and p=="/api/leaderboard":return self.sendj(200,leaderboard(i(q.get("round_id",["0"])[0])))
         parts=p.strip("/").split("/")
-        if len(parts)==3 and parts[:2]==["api","lineup"] and a["role"]=="participant":
+        if len(parts)==3 and parts[:2]==["api","lineup"] and a.get("participant_id"):
             rid=i(parts[2]); r=row("SELECT * FROM rounds WHERE id=?",(rid,))
-            if m=="GET":return self.sendj(200,{"lineup":lineup(a["id"],rid),"score":score(a["id"],rid)})
+            if m=="GET":return self.sendj(200,{"lineup":lineup(a["participant_id"],rid),"score":score(a["participant_id"],rid)})
             if m=="PUT":
                 if not r or r["status"]!="open":return self.sendj(400,{"error":"الجولة مقفلة"})
                 b=self.body();items=b.get("players",[]);ids=[i(x.get("player_id")) for x in items]
@@ -339,35 +346,35 @@ class H(BaseHTTPRequestHandler):
                 cap=i(b.get("captain_player_id"));vice=i(b.get("vice_player_id"));sid={i(x["player_id"]) for x in st}
                 if cap==vice or cap not in sid or vice not in sid:return self.sendj(400,{"error":"الكبتن والنائب يجب أن يكونا أساسيين مختلفين"})
                 chip=b.get("chip") or None
-                if chip and chip in used_chips(a["id"],rid):return self.sendj(400,{"error":"استخدمت هذه الطاقة سابقاً"})
-                ex=row("SELECT id FROM lineups WHERE participant_id=? AND round_id=?",(a["id"],rid))
+                if chip and chip in used_chips(a["participant_id"],rid):return self.sendj(400,{"error":"استخدمت هذه الطاقة سابقاً"})
+                ex=row("SELECT id FROM lineups WHERE participant_id=? AND round_id=?",(a["participant_id"],rid))
                 if ex:
                     lid=ex["id"];execq("UPDATE lineups SET captain_player_id=?,vice_player_id=?,chip=?,updated_at=? WHERE id=?",(cap,vice,chip,now(),lid));execq("DELETE FROM lineup_players WHERE lineup_id=?",(lid,))
                 else:lid=insert_id("INSERT INTO lineups(participant_id,round_id,captain_player_id,vice_player_id,chip,submitted_at,updated_at) VALUES(?,?,?,?,?,?,?)",(a["id"],rid,cap,vice,chip,now(),now()))
                 for x in items:execq("INSERT INTO lineup_players(lineup_id,player_id,role,bench_order) VALUES(?,?,?,?)",(lid,i(x["player_id"]),x["role"],i(x.get("bench_order"))))
                 if not PG:conn.commit()
                 return self.sendj(200,{"ok":True})
-        if p=="/api/account/profile" and a["role"]=="participant":
+        if p=="/api/account/profile" and a.get("participant_id"):
             if m=="GET":
-                prof=row("SELECT u.id,u.name,u.username,u.profile_image,p.id player_id,p.group_no FROM participants u LEFT JOIN players p ON p.participant_id=u.id WHERE u.id=?",(a["id"],))
+                prof=row("SELECT u.id,u.name,u.username,u.profile_image,p.id player_id,p.group_no FROM participants u LEFT JOIN players p ON p.participant_id=u.id WHERE u.id=?",(a["participant_id"],))
                 return self.sendj(200,prof or {})
             if m=="PUT":
                 b=self.body()
                 try:img=clean_profile_image(b.get("image"))
                 except ValueError as e:return self.sendj(400,{"error":str(e)})
-                execq("UPDATE participants SET profile_image=? WHERE id=?",(img,a["id"]))
+                execq("UPDATE participants SET profile_image=? WHERE id=?",(img,a["participant_id"]))
                 if not PG:conn.commit()
                 return self.sendj(200,{"ok":True,"profile_image":img})
-        if m=="PUT" and p=="/api/account/code" and a["role"]=="participant":
-            b=self.body();cur=row("SELECT code_hash FROM participants WHERE id=? AND active=1",(a["id"],))
+        if m=="PUT" and p=="/api/account/code" and a.get("participant_id"):
+            b=self.body();cur=row("SELECT code_hash FROM participants WHERE id=? AND active=1",(a["participant_id"],))
             current=str(b.get("current","")).strip();new=str(b.get("next","")).strip();confirm=str(b.get("confirm","")).strip()
             if not cur or h(current.upper(),"dawair-participant-v1")!=cur["code_hash"]:return self.sendj(400,{"error":"رمز الدخول الحالي غير صحيح"})
             if len(new)<4:return self.sendj(400,{"error":"رمز الدخول الجديد يجب أن يكون 4 أحرف على الأقل"})
             if new!=confirm:return self.sendj(400,{"error":"تأكيد رمز الدخول غير مطابق"})
-            execq("UPDATE participants SET code_hash=?,code_hint=?,code_ciphertext=? WHERE id=?",(h(new.upper(),"dawair-participant-v1"),new[-3:].upper(),enc_code(new),a["id"]))
+            execq("UPDATE participants SET code_hash=?,code_hint=?,code_ciphertext=? WHERE id=?",(h(new.upper(),"dawair-participant-v1"),new[-3:].upper(),enc_code(new),a["participant_id"]))
             if not PG:conn.commit()
             return self.sendj(200,{"ok":True})
-        if a["role"]!="admin":return self.sendj(403,{"error":"خاص بالمشرف"})
+        if not a.get("is_admin"):return self.sendj(403,{"error":"خاص بالمسؤول"})
         if m=="GET" and p=="/api/admin/dashboard":return self.sendj(200,{"players":val("SELECT COUNT(*) FROM players WHERE active=1"),"participants":val("SELECT COUNT(*) FROM participants WHERE active=1"),"rounds":val("SELECT COUNT(*) FROM rounds"),"lineups":val("SELECT COUNT(*) FROM lineups"),"leaderboard":leaderboard()[:10]})
         if len(parts)==4 and parts[:3]==["api","admin","lineups"] and m=="GET":
             rid=i(parts[3]);rnd=row("SELECT id,number,name,status FROM rounds WHERE id=?",(rid,))
@@ -378,7 +385,7 @@ class H(BaseHTTPRequestHandler):
                 out.append({"participant":u,"lineup":l,"score":score(u["id"],rid) if l else 0})
             return self.sendj(200,{"round":rnd,"items":out})
         if m=="GET" and p=="/api/admin/participants":
-            items=rows("SELECT u.id,u.name,u.username,u.code_hint,u.code_ciphertext,u.active,p.id player_id,p.name player_name FROM participants u LEFT JOIN players p ON p.participant_id=u.id ORDER BY u.name")
+            items=rows("SELECT u.id,u.name,u.username,u.code_hint,u.code_ciphertext,u.active,u.is_admin,p.id player_id,p.name player_name FROM participants u LEFT JOIN players p ON p.participant_id=u.id ORDER BY u.name")
             for x in items:x["code_full"]=dec_code(x.pop("code_ciphertext",None))
             return self.sendj(200,items)
         if m=="POST" and p=="/api/admin/participants":
@@ -401,14 +408,14 @@ class H(BaseHTTPRequestHandler):
         if len(parts)==4 and parts[:3]==["api","admin","participants"] and m=="PUT":
             b=self.body();uid=i(parts[3]);cur=row("SELECT * FROM participants WHERE id=?",(uid,))
             if not cur:return self.sendj(404,{"error":"الحساب غير موجود"})
-            name=str(b.get("name",cur["name"])).strip();un=norm_username(b.get("username",cur.get("username") or ""));active=1 if b.get("active",bool(cur["active"])) else 0
+            name=str(b.get("name",cur["name"])).strip();un=norm_username(b.get("username",cur.get("username") or ""));active=1 if b.get("active",bool(cur["active"])) else 0;is_admin=1 if b.get("is_admin",bool(cur.get("is_admin"))) else 0
             if not name or not valid_username(un):return self.sendj(400,{"error":"الاسم أو اليوزر غير صالح"})
             if row("SELECT id FROM participants WHERE username=? AND id<>?",(un,uid)):return self.sendj(400,{"error":"اليوزر مستخدم بالفعل"})
             if b.get("code"):
                 code=str(b["code"]).strip()
                 if len(code)<4:return self.sendj(400,{"error":"رمز الدخول يجب أن يكون 4 أحرف على الأقل"})
-                execq("UPDATE participants SET name=?,username=?,active=?,code_hash=?,code_hint=?,code_ciphertext=? WHERE id=?",(name,un,active,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),enc_code(code),uid))
-            else:execq("UPDATE participants SET name=?,username=?,active=? WHERE id=?",(name,un,active,uid))
+                execq("UPDATE participants SET name=?,username=?,active=?,is_admin=?,code_hash=?,code_hint=?,code_ciphertext=? WHERE id=?",(name,un,active,is_admin,h(code.upper(),"dawair-participant-v1"),code[-3:].upper(),enc_code(code),uid))
+            else:execq("UPDATE participants SET name=?,username=?,active=?,is_admin=? WHERE id=?",(name,un,active,is_admin,uid))
             execq("UPDATE players SET name=? WHERE participant_id=?",(name,uid))
             if not PG:conn.commit()
             return self.sendj(200,{"ok":True})
@@ -480,13 +487,20 @@ class H(BaseHTTPRequestHandler):
             for k,v in self.body().items():execq("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(k,str(v)))
             conn.commit() if not PG else None;return self.sendj(200,{"ok":True})
         if m=="PUT" and p=="/api/admin/password":
-            b=self.body();ad=row("SELECT * FROM admins WHERE id=?",(a["id"],))
-            if h(b.get("current",""),ad["salt"])!=ad["password_hash"]:return self.sendj(400,{"error":"كلمة المرور الحالية غير صحيحة"})
-            np=str(b.get("next",""))
+            b=self.body();np=str(b.get("next",""));current=str(b.get("current",""))
             if len(np)<8:return self.sendj(400,{"error":"8 أحرف على الأقل"})
-            salt=secrets.token_hex(16);execq("UPDATE admins SET password_hash=?,salt=? WHERE id=?",(h(np,salt),salt,a["id"]));conn.commit() if not PG else None;return self.sendj(200,{"ok":True})
+            if a.get("participant_id"):
+                cur=row("SELECT code_hash FROM participants WHERE id=?",(a["participant_id"],))
+                if not cur or h(current.upper(),"dawair-participant-v1")!=cur["code_hash"]:return self.sendj(400,{"error":"كلمة المرور الحالية غير صحيحة"})
+                execq("UPDATE participants SET code_hash=?,code_hint=?,code_ciphertext=? WHERE id=?",(h(np.upper(),"dawair-participant-v1"),np[-3:].upper(),enc_code(np),a["participant_id"]))
+            else:
+                ad=row("SELECT * FROM admins WHERE id=?",(a["id"],))
+                if not ad or h(current,ad["salt"])!=ad["password_hash"]:return self.sendj(400,{"error":"كلمة المرور الحالية غير صحيحة"})
+                salt=secrets.token_hex(16);execq("UPDATE admins SET password_hash=?,salt=? WHERE id=?",(h(np,salt),salt,a["id"]))
+            if not PG:conn.commit()
+            return self.sendj(200,{"ok":True})
         if m=="GET" and p=="/api/admin/backup":
-            data={"exported_at":now(),"settings":rows("SELECT * FROM settings"),"participants":rows("SELECT id,name,username,code_hint,profile_image,active,created_at FROM participants"),"players":rows("SELECT * FROM players"),"rounds":rows("SELECT * FROM rounds"),"lineups":rows("SELECT * FROM lineups"),"lineup_players":rows("SELECT * FROM lineup_players"),"events":rows("SELECT * FROM events")}
+            data={"exported_at":now(),"settings":rows("SELECT * FROM settings"),"participants":rows("SELECT id,name,username,code_hint,profile_image,active,is_admin,created_at FROM participants"),"players":rows("SELECT * FROM players"),"rounds":rows("SELECT * FROM rounds"),"lineups":rows("SELECT * FROM lineups"),"lineup_players":rows("SELECT * FROM lineup_players"),"events":rows("SELECT * FROM events")}
             return self.sendj(200,data)
         return self.sendj(404,{"error":"المسار غير موجود"})
 
