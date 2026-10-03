@@ -310,6 +310,83 @@ def leaderboard(rid=0):
     for n,x in enumerate(out,1):x["rank"]=n
     return out
 
+def admin_people():
+    cur=competition_round()
+    out=[]
+    linked=set()
+    q="""SELECT u.id,u.name,u.username,u.profile_image,u.active,u.is_admin,
+                p.id player_id,p.group_no,p.active player_active
+         FROM participants u LEFT JOIN players p ON p.participant_id=u.id
+         ORDER BY u.name"""
+    for x in rows(q):
+        if x.get("player_id"):linked.add(x["player_id"])
+        roles=["مشترك"]
+        if x.get("player_id"):roles.append("لاعب")
+        if x.get("is_admin"):roles.append("مسؤول مساعد")
+        submitted=False;round_score=0
+        if cur:
+            l=lineup(x["id"],cur["id"]);submitted=bool(l)
+            if l:round_score=score(x["id"],cur["id"])
+        out.append({
+            "key":str(x["id"]),"participant_id":x["id"],"player_id":x.get("player_id"),
+            "name":x["name"],"username":x.get("username"),"profile_image":x.get("profile_image"),
+            "roles":roles,"group_no":x.get("group_no"),"active":bool(x.get("active")),
+            "player_active":bool(x.get("player_active")) if x.get("player_id") else None,
+            "is_admin":bool(x.get("is_admin")),"submitted":submitted,"round_score":round_score,
+            "round_id":cur["id"] if cur else None,"round_name":cur["name"] if cur else None
+        })
+    for p in rows("SELECT id,name,group_no,active FROM players WHERE participant_id IS NULL ORDER BY name"):
+        out.append({
+            "key":"player-"+str(p["id"]),"participant_id":None,"player_id":p["id"],
+            "name":p["name"],"username":None,"profile_image":None,"roles":["لاعب"],
+            "group_no":p["group_no"],"active":bool(p["active"]),"player_active":bool(p["active"]),
+            "is_admin":False,"submitted":False,"round_score":0,
+            "round_id":cur["id"] if cur else None,"round_name":cur["name"] if cur else None
+        })
+    out.sort(key=lambda x:x["name"])
+    return out
+
+def admin_person(key):
+    key=str(key or "")
+    if key.startswith("player-"):
+        pid=i(key[7:])
+        p=row("SELECT id,name,group_no,active FROM players WHERE id=? AND participant_id IS NULL",(pid,))
+        if not p:return None
+        return {
+            "key":key,"name":p["name"],"profile_image":None,"roles":["لاعب"],
+            "participant":None,
+            "player":{"id":p["id"],"name":p["name"],"group_no":p["group_no"],"active":bool(p["active"])},
+            "lineups":[],"rounds":rows("SELECT id,number,name,status,lock_at FROM rounds ORDER BY number DESC")
+        }
+    uid=i(key)
+    if not uid:return None
+    u=row("""SELECT u.id,u.name,u.username,u.profile_image,u.code_hint,u.code_ciphertext,u.active,u.is_admin,
+                    p.id player_id,p.name player_name,p.group_no,p.active player_active
+             FROM participants u LEFT JOIN players p ON p.participant_id=u.id WHERE u.id=?""",(uid,))
+    if not u:return None
+    roles=["مشترك"]
+    if u.get("player_id"):roles.append("لاعب")
+    if u.get("is_admin"):roles.append("مسؤول مساعد")
+    rr=rows("SELECT id,number,name,status,lock_at FROM rounds ORDER BY number DESC")
+    history=[]
+    for r in rr:
+        l=lineup(uid,r["id"])
+        history.append({"round":r,"lineup":l,"score":score(uid,r["id"]) if l else 0})
+    return {
+        "key":str(uid),"name":u["name"],"profile_image":u.get("profile_image"),"roles":roles,
+        "participant":{
+            "id":u["id"],"name":u["name"],"username":u.get("username"),
+            "profile_image":u.get("profile_image"),"code_hint":u.get("code_hint"),
+            "code_full":dec_code(u.get("code_ciphertext")),"active":bool(u.get("active")),
+            "is_admin":bool(u.get("is_admin"))
+        },
+        "player":None if not u.get("player_id") else {
+            "id":u["player_id"],"name":u.get("player_name") or u["name"],
+            "group_no":u.get("group_no"),"active":bool(u.get("player_active"))
+        },
+        "lineups":history,"rounds":rr
+    }
+
 class H(BaseHTTPRequestHandler):
     def log_message(self,f,*a): print("[WEB]",f%a)
     def body(self):
@@ -440,6 +517,11 @@ class H(BaseHTTPRequestHandler):
             return self.sendj(200,{"ok":True})
         if not a.get("is_admin"):return self.sendj(403,{"error":"خاص بالمسؤول"})
         if m=="GET" and p=="/api/admin/dashboard":return self.sendj(200,{"players":val("SELECT COUNT(*) FROM players WHERE active=1"),"participants":val("SELECT COUNT(*) FROM participants WHERE active=1"),"rounds":val("SELECT COUNT(*) FROM rounds"),"lineups":val("SELECT COUNT(*) FROM lineups"),"leaderboard":leaderboard()[:10]})
+        if m=="GET" and p=="/api/admin/people":return self.sendj(200,admin_people())
+        if len(parts)==4 and parts[:3]==["api","admin","people"] and m=="GET":
+            person=admin_person(parts[3])
+            if not person:return self.sendj(404,{"error":"الشخص غير موجود"})
+            return self.sendj(200,person)
         if len(parts)==4 and parts[:3]==["api","admin","lineups"] and m=="GET":
             rid=i(parts[3]);rnd=row("SELECT id,number,name,status FROM rounds WHERE id=?",(rid,))
             if not rnd:return self.sendj(404,{"error":"الجولة غير موجودة"})
@@ -449,7 +531,7 @@ class H(BaseHTTPRequestHandler):
                 out.append({"participant":u,"lineup":l,"score":score(u["id"],rid) if l else 0})
             return self.sendj(200,{"round":rnd,"items":out})
         if m=="GET" and p=="/api/admin/participants":
-            items=rows("SELECT u.id,u.name,u.username,u.code_hint,u.code_ciphertext,u.active,u.is_admin,p.id player_id,p.name player_name FROM participants u LEFT JOIN players p ON p.participant_id=u.id ORDER BY u.name")
+            items=rows("SELECT u.id,u.name,u.username,u.profile_image,u.code_hint,u.code_ciphertext,u.active,u.is_admin,p.id player_id,p.name player_name FROM participants u LEFT JOIN players p ON p.participant_id=u.id ORDER BY u.name")
             for x in items:x["code_full"]=dec_code(x.pop("code_ciphertext",None))
             return self.sendj(200,items)
         if m=="POST" and p=="/api/admin/participants":
