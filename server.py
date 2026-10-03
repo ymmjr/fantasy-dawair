@@ -73,7 +73,12 @@ def has_col(table,col):
 def player_account_username(name):
     parts=[x for x in re.split(r"\s+",str(name or "").strip()) if x]
     if not parts:return ""
-    return norm_username(parts[0] if len(parts)==1 else f"{parts[0]} {parts[-1]}")
+    if len(parts)>=3 and parts[-2:]==["شمس","الدين"]:
+        out=f"{parts[0]} شمس الدين"
+    else:
+        out=parts[0] if len(parts)==1 else f"{parts[0]} {parts[-1]}"
+    out=re.sub(r"[\u064B-\u065F\u0670\u0640]","",out)
+    return norm_username(out)
 
 def english_first_name(name):
     parts=[x for x in re.split(r"\s+",str(name or "").strip()) if x]
@@ -83,7 +88,7 @@ def english_first_name(name):
     ar=re.sub(r"[\u064B-\u065F\u0670\u0640]","",first)
     ar=ar.replace("أ","ا").replace("إ","ا").replace("آ","ا")
     known={
-      "يوسف":"Yousef","محمد":"Mohammed","محمود":"Mahmoud","احمد":"Ahmed","حمد":"Hamad",
+      "يوسف":"Yousef","محمد":"Mohammed","محمود":"Mahmoud","احمد":"Ahmed","حمد":"Hamad","راكان":"Rakan","داود":"Dawood","مساعد":"Musaed","رشود":"Rshood","سالم":"Salem",
       "خالد":"Khaled","فهد":"Fahad","سعود":"Saud","ناصر":"Nasser","بدر":"Bader",
       "سلمان":"Salman","عمر":"Omar","علي":"Ali","حسن":"Hasan","حسين":"Hussain",
       "مشعل":"Meshal","فيصل":"Faisal","راشد":"Rashid","صالح":"Saleh","ابراهيم":"Ibrahim",
@@ -114,8 +119,8 @@ def english_first_name(name):
     s=re.sub(r"[^A-Za-z0-9]","",s) or "Player"
     return s[:1].upper()+s[1:].lower()
 
-def ensure_player_accounts_v5():
-    if val("SELECT COUNT(*) FROM schema_migrations WHERE version=5"):return
+def ensure_player_accounts_v6():
+    if val("SELECT COUNT(*) FROM schema_migrations WHERE version=6"):return
     made=updated=linked=skipped=0
     details=[]
     for p in rows("SELECT id,name,participant_id FROM players WHERE active=1 ORDER BY id"):
@@ -146,9 +151,9 @@ def ensure_player_accounts_v5():
                 execq("UPDATE players SET participant_id=? WHERE id=?",(uid,p["id"]))
                 made+=1
         details.append({"player_id":p["id"],"name":p["name"],"username":username,"status":"ok"})
-    execq("INSERT INTO schema_migrations(version,applied_at) VALUES(5,?) ON CONFLICT(version) DO NOTHING",(now(),))
+    execq("INSERT INTO schema_migrations(version,applied_at) VALUES(6,?) ON CONFLICT(version) DO NOTHING",(now(),))
     if not PG:conn.commit()
-    print("PLAYER_ACCOUNTS_V5",json.dumps({"created":made,"updated":updated,"linked_existing":linked,"skipped":skipped,"details":details},ensure_ascii=False))
+    print("PLAYER_ACCOUNTS_V6",json.dumps({"created":made,"updated":updated,"linked_existing":linked,"skipped":skipped,"details":details},ensure_ascii=False))
 
 def init():
     ID="BIGSERIAL PRIMARY KEY" if PG else "INTEGER PRIMARY KEY AUTOINCREMENT"
@@ -190,7 +195,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(2,?) ON CONFLICT(version) DO NOTHING",(now(),))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(3,?) ON CONFLICT(version) DO NOTHING",(now(),))
         execq("INSERT INTO schema_migrations(version,applied_at) VALUES(4,?) ON CONFLICT(version) DO NOTHING",(now(),))
-        ensure_player_accounts_v5()
+        ensure_player_accounts_v6()
         if val("SELECT COUNT(*) FROM admins")==0:
             user=os.getenv("ADMIN_USERNAME","admin")
             pw=os.getenv("ADMIN_PASSWORD","").strip() or secrets.token_urlsafe(16)
