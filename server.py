@@ -350,7 +350,7 @@ class H(BaseHTTPRequestHandler):
                 ex=row("SELECT id FROM lineups WHERE participant_id=? AND round_id=?",(a["participant_id"],rid))
                 if ex:
                     lid=ex["id"];execq("UPDATE lineups SET captain_player_id=?,vice_player_id=?,chip=?,updated_at=? WHERE id=?",(cap,vice,chip,now(),lid));execq("DELETE FROM lineup_players WHERE lineup_id=?",(lid,))
-                else:lid=insert_id("INSERT INTO lineups(participant_id,round_id,captain_player_id,vice_player_id,chip,submitted_at,updated_at) VALUES(?,?,?,?,?,?,?)",(a["id"],rid,cap,vice,chip,now(),now()))
+                else:lid=insert_id("INSERT INTO lineups(participant_id,round_id,captain_player_id,vice_player_id,chip,submitted_at,updated_at) VALUES(?,?,?,?,?,?,?)",(a["participant_id"],rid,cap,vice,chip,now(),now()))
                 for x in items:execq("INSERT INTO lineup_players(lineup_id,player_id,role,bench_order) VALUES(?,?,?,?)",(lid,i(x["player_id"]),x["role"],i(x.get("bench_order"))))
                 if not PG:conn.commit()
                 return self.sendj(200,{"ok":True})
